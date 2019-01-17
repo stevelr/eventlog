@@ -1,0 +1,7 @@
+include *.md
+include LICENSE
+include README.rst
+include docs/Makefile
+recursive-include examples *.py *.sh
+recursive-include docs *.py *.sh *.rst
+
