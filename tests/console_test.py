@@ -1,6 +1,6 @@
 import unittest
 
-from eventlog import Event, EventLogger, ConsoleEventLogger
+from eventlog import Event, EventLogger, ConsoleEventLogger, formatTstampAsMillis
 from logging import getLogger, DEBUG, INFO
 
 def viewResource(resourceId):
@@ -13,6 +13,9 @@ class ConsoleLogTest(unittest.TestCase):
 
     def setUp(self):
         self.consoleLogger = ConsoleEventLogger()
+        # format timestamps as milliseconds
+        self.consoleLogger.addFilter(formatTstampAsMillis)
+
         log = getLogger()
         log.addHandler(self.consoleLogger)
         log.setLevel(DEBUG)
@@ -32,5 +35,3 @@ class ConsoleLogTest(unittest.TestCase):
         event = viewResource('alice-in-wonderland')
         self.consoleLogger.logEvent(event)
         self.assertTrue(event is not None)
-
-

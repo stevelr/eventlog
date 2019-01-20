@@ -73,11 +73,11 @@ When used in this way, log() messages are converted to Event objects and sent as
 to a remote log forwarder (e.g., logstash, fluentd, or google pubsub)
 
 ```
-    from eventlog import asyncEventLogger
+    from eventlog import defaultAsyncLogger
     import logging
 
     logger = logging.getLogger('my-app')
-    logger.addHandler(asyncEventLogger)
+    logger.addHandler(defaultAsyncLogger())
 
     logger.info("some message")
 ```
@@ -150,7 +150,7 @@ The effictive primary key of the primary event table is (day, tgType, action, ta
 
 
 ## How logging parameters map to event fields
-When asyncEventLogger (or any other instance of EventLogger) is used as a logging handler, log messages are translated to fields of the event object.
+When defaultAsyncLogger() (or any other instance of EventLogger) is used as a logging handler, log messages are translated to fields of the event object.
 ```
     log.info("my message")
     log.info("my message", tags=[ "thing-one", "thing-two" ],

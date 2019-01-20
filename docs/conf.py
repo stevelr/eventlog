@@ -157,4 +157,3 @@ texinfo_documents = [
      author, 'eventlog', 'One line description of project.',
      'Miscellaneous'),
 ]
-

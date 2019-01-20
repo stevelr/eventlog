@@ -15,16 +15,18 @@ from .proto import getSerializer
 # EventFormatter - turns a python logging record into an Event and formats it
 class EventFormatter(logging.Formatter):
 
-    # @param serialize - function to flatten event to byte array (or string in py2)
+    # @param getSerializer - function
+    # that returns a serializer function,
+    # which flattens event to byte array (or string in py2)
     # The Serializer is often tied to the network protocol
     # (fluentd uses a msgpack serializer, etc.)
     # if None, the default formatter (json) will be used
-    def __init__(self, serialize=None):
-        self.serialize = serialize or getSerializer()
+    def __init__(self, getSerializerFn=None):
+        self.getSerializerFn = getSerializerFn or (lambda: getSerializer())
 
     def format(self, record):
-        e = LogRecordEvent(record)
-        return self.serialize(e)
+        e = LogRecordEvent(record).toDict()
+        return self.getSerializerFn()(e)
 
 
 # EventLogger sends events to a forwarding server,
@@ -43,9 +45,10 @@ class EventFormatter(logging.Formatter):
 class EventLogger(AsynchronousLogHandler):
 
     def __init__(self, *args, **kwargs):
-        self.serialize = kwargs.pop('serialize') or getSerializer()
+        ser = kwargs.pop('serialize') or getSerializer()
         super(EventLogger, self).__init__(*args, **kwargs)
-        self.formatter = EventFormatter(self.serialize)
+        self.serialize = ser
+        self.formatter = EventFormatter(self.getSerializer)
 
     # add event to queue for sending to logstash
     # queue is persistent locally (via sqlite) so this should work
@@ -57,7 +60,7 @@ class EventLogger(AsynchronousLogHandler):
     #
     def logEvent(self, event):
 
-        stream = self.serialize(event)
+        stream = self.serialize(event.toDict())
         self._setup_transport()
         self._start_worker_thread()
 
@@ -79,6 +82,21 @@ class EventLogger(AsynchronousLogHandler):
     # Create a Counter/Gauge value that logs all changes.
     def createTrackingValue(self, name, target, initialValue=0, fields={}):
         return _LoggingValue(self, name, target, initialValue, fields)
+
+    def getSerializer(self):
+        return self.serialize
+
+    def setSerializer(self, ser):
+        self.serialize = ser
+
+    # add a filter function to process event objects
+    # before they are serialized. A filter function
+    # takes dictionary and returns the processed dictionary.
+    # Filters can be cascaded.
+    def addFilter(self, filter):
+        ser = self.getSerializer()
+        new_ser = lambda evDict: ser(filter(evDict))
+        self.setSerializer(new_ser)
 
 
 class _LoggingValue(object):
@@ -150,11 +168,12 @@ class ConsoleEventLogger(EventLogger):
 
     # override emit to prevent asynchronous behavior
     def emit(self, record):
-        data = self.serialize(LogRecordEvent(record))
+        evDict = LogRecordEvent(record).toDict()
+        data = self.serialize(evDict)
         self.writeln(data)
 
     def logEvent(self, event):
-        data = self.serialize(event)
+        data = self.serialize(event.toDict())
         self.writeln(data)
 
     # write a buffer to output channel and terminate with newline
@@ -166,33 +185,35 @@ class ConsoleEventLogger(EventLogger):
         self.ch.write(self.delim)
 
 
-# Create system default event logger
-def createDefaultLogger():
-    logHost = getConfigSetting('EVENTLOG_HOST')
-    streamFmt = getConfigSetting('EVENTLOG_FORMAT')
-    serialize = getSerializer(streamFmt)
-
-    if logHost == 'console' or not logHost:
-        # If logstash connection properties are not set,
-        # events will log to the console
-        logger = ConsoleEventLogger()
-    else:
-        logPort = getConfigSetting('EVENTLOG_PORT')
-        logPort = logPort and int(logPort) or 5001
-        logger = EventLogger(
-            host=logHost,
-            port=logPort,
-            database_path=getConfigSetting('EVENTLOG_DB'),
-            serialize=serialize)
-
-    return logger
+# internal global for default loger
+_systemDefaultAsyncLogger = None
 
 
-# default system logger
-asyncEventLogger = createDefaultLogger()
+# Return system default async event logger, creating it if necessary
+# Uses configuration provided by environment variables
+def defaultAsyncLogger():
+    global _systemDefaultAsyncLogger
+    if _systemDefaultAsyncLogger is None:
+        logHost = getConfigSetting('EVENTLOG_HOST')
+        streamFmt = getConfigSetting('EVENTLOG_FORMAT')
+        serialize = getSerializer(streamFmt)
+
+        if logHost == 'console' or not logHost:
+            # If logstash connection properties are not set,
+            # events will log to the console
+            logger = ConsoleEventLogger()
+        else:
+            logPort = getConfigSetting('EVENTLOG_PORT')
+            logPort = logPort and int(logPort) or 5001
+            logger = EventLogger(
+                host=logHost,
+                port=logPort,
+                database_path=getConfigSetting('EVENTLOG_DB'),
+                serialize=serialize)
+        _systemDefaultAsyncLogger = logger
+    return _systemDefaultAsyncLogger
 
 
 # convenience function
 def logEvent(e):
-    if asyncEventLogger:
-        asyncEventLogger.logEvent(e)
+    defaultAsyncLogger().logEvent(e)

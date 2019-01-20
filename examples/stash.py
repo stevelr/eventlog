@@ -1,5 +1,5 @@
 import os
-from eventlog import Event,EventLogger, logEvent, asyncEventLogger
+from eventlog import Event,EventLogger, logEvent, defaultAsyncLogger
 from logging import getLogger, DEBUG, INFO
 
 # you may find it useful to define helper functions
@@ -29,5 +29,3 @@ def someevent():
 
 somecode()
 #someevent()
-
-

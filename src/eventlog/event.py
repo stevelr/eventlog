@@ -3,16 +3,16 @@ import socket
 import sys
 import time
 import traceback
-from copy import copy
 
 import six
-
 from .config import _getUserContext, getConfigSetting
 
 try:
     import ujson as json
 except ImportError:
     import json
+
+_EVENT_SCHEMA_VERSION = 0.9  # major.minor
 
 
 class LogLevel:
@@ -30,27 +30,27 @@ class LogLevel:
     MAX_VALUE = EXTREME
 
 
+# returns integer log level from name, e.g., "DEBUG" returns 3
+# if not found, returns KeyError
+def LogLevelValueOf(s):
+    s = s.upper()
+    try:
+        return getattr(LogLevel, s)
+    except AttributeError:
+        raise KeyError(s, "Invalid log level")
+
+
 class Event(object):
 
     # static variables calculated once and cached
     host = socket.gethostname()
-    version = 1
+    version = _EVENT_SCHEMA_VERSION
     pid = os.getpid()
     # site and cluster can be defined in environment or settings
     # (if both, environment takes precedence)
     # if neither, an error message is printed
     site = getConfigSetting('EVENTLOG_SITE')
     cluster = getConfigSetting('EVENTLOG_CLUSTER')
-
-    '''tsunits - global setting for timestamp units.
-       Time is stored in the event log as a floating point number of seconds.
-       When exported, they can be converted to either milliseconds or nanoseconds
-
-       Options are "sec": time is a floating point number of seconds,
-                   "ms": time is an integer point number of milliseconds,
-                   "ns": time is an integer number of nanoseconds
-        Default is "ms" '''
-    tsunits = getConfigSetting('EVENTLOG_UNITS')
 
     '''Eventlog constructor
        @param name the event name
@@ -73,36 +73,36 @@ class Event(object):
     def __init__(self,
                  name,
                  target,
-                 value=0,
+                 value=None,
                  level=LogLevel.NOTSET,
                  message=None,
                  fields=None,
                  logFrame=False,
                  ):
+        self._d = {
+            'name': name,
+            'tstamp': time.time(),
+            'version': Event.version,
+            'host': Event.host,
+            'pid': Event.pid,
+            'level': self.validateLevel(level),
+        }
 
-        self.name = name
-        self.tstamp = time.time()     # float seconds
-        self.version = Event.version
-        self.host = Event.host
-        self.site = Event.site
-        self.cluster = Event.cluster
-        self.pid = Event.pid
-        self.target = target
-        self.message = message
-        self.value = value
-        self.codeFile = None
-        self.codeLine = 0
-        self.codeFunc = None
-        self.fields = None
-
-        self.setLevel(level)
+        self.setIfNN('site', Event.site)
+        self.setIfNN('cluster', Event.cluster)
+        self.setIfNN('target', target)
+        self.setIfNN('message', message)
+        self.setIfNN('value', value)
 
         if logFrame:
             self.addCodeFrame()
 
         # collect user context, if middleware hook is installed
         if _getUserContext:
-            self.reqId, self.user, self.session = _getUserContext()
+            reqId, user, ses = _getUserContext()
+            self.set('reqId', reqId)
+            self.set('user', user)
+            self.set('session', ses)
 
         if fields:
             self.addFields(fields)
@@ -112,15 +112,16 @@ class Event(object):
               "line: ", f.f_code.co_firstlineno, f.f_lineno,
               "name: ", f.f_code.co_name)
 
-    def setLevel(self, level):
+    def validateLevel(self, level):
         if isinstance(level, six.integer_types):
-            self.level = level
+            lv = level
         elif isinstance(level, six.string_types):
-            self.level = LogLevel.__dict__[level.upper()]
+            lv = LogLevelValueOf(level)
         else:
             raise Exception("Invalid level: " + str(level))
-        if self.level < LogLevel.MIN_VALUE or self.level > LogLevel.MAX_VALUE:
-            raise Exception("Level out of range: %d" % self.level)
+        if lv < LogLevel.MIN_VALUE or lv > LogLevel.MAX_VALUE:
+            raise Exception("Level out of range: %d" % lv)
+        return lv
 
     '''addTags adds a list of string tags to the event.
        Tags are modeled as fields, with field_name=label, value=1
@@ -132,10 +133,13 @@ class Event(object):
        @param fields - dict of key-value pairs
     '''
     def addFields(self, fields):
-        if not self.fields:
-            self.fields = {}
+        try:
+            fmap = self._d['fields']
+        except KeyError:
+            fmap = {}
+            self.set('fields', fmap)
         for (k, v) in six.iteritems(fields):
-            self.fields[k] = v
+            fmap[k] = v
 
     '''addLabels adds a set of label/value pairs (alias for addFields)'''
     def addLabels(self, labels):
@@ -155,14 +159,21 @@ class Event(object):
                 frame = frame.f_back
             else:
                 break
-        self.codeFile = frame.f_code.co_filename
-        self.codeLine = frame.f_lineno
-        self.codeFunc = frame.f_code.co_name
+        self.set('codeFile', frame.f_code.co_filename)
+        self.set('codeLine', frame.f_lineno)
+        self.set('codeFunc', frame.f_code.co_name)
 
     # returns a dictionary containing all the event fields
     # extra fields are in "fields"
     def toDict(self):
-        return copy(self.__dict__)
+        return self._d
+
+    def set(self, key, val):
+        self._d['key'] = val
+
+    def setIfNN(self, key, val):
+        if val is not None:
+            self._d['key'] = val
 
 
 # LogRecordEvent - an Event wrapper around a python logging Record
@@ -178,7 +189,7 @@ class LogRecordEvent(Event):
             logFrame=True,
         )
         if record.created:
-            self.tstamp = record.created
+            self.set('tstamp', record.created)
         tags = getattr(record, 'tags', [])
         if tags:
             self.addTags(tags)
@@ -191,5 +202,5 @@ class LogRecordEvent(Event):
             self.addFields({
                 'exc_info': json.dumps((excType, val, tbdata)),
             })
-            if self.level == LogLevel.NOTSET:
-                self.level = LogLevel.ERROR
+            if self._d == LogLevel.NOTSET:
+                self.set('level', LogLevel.ERROR)

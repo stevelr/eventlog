@@ -1,35 +1,36 @@
 # eventlog package
 
-__version__ = "0.9.0"
+from .config import getConfigSetting, initMiddleware
+from .event import Event, LogLevel, LogLevelValueOf
+from .handler import ConsoleEventLogger, defaultAsyncLogger,\
+    EventFormatter, EventLogger, logEvent
+from .proto import formatTstampAsMillis, formatTstampAsNanos,\
+    getSerializer
 
-from .event import LogLevel, Event
-
-from .handler import EventFormatter, EventLogger, ConsoleEventLogger,\
-    createDefaultLogger, asyncEventLogger, logEvent
-
-from .proto import getSerializer
-
-from .config import initMiddleware, getConfigSetting
+__version__ = "0.9.101"  # keep in sync with ../../setup.py
 
 __all__ = [
+
     __version__,
 
     # event
     Event,
     LogLevel,
+    LogLevelValueOf,
 
     # handler
+    ConsoleEventLogger,
+    defaultAsyncLogger,
     EventFormatter,
     EventLogger,
-    ConsoleEventLogger,
-    createDefaultLogger,
-    asyncEventLogger,
     logEvent,
 
     # proto
+    formatTstampAsMillis,
+    formatTstampAsNanos,
     getSerializer,
 
     # config
-    initMiddleware,
     getConfigSetting,
+    initMiddleware,
 ]

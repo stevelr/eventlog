@@ -4,8 +4,7 @@ from os import path
 from setuptools import setup
 
 NAME = "eventlog"
-VERSION = "0.0.1"
-
+VERSION = "0.9.101"  # keep in sync with src/eventlog/__init__.py
 requires = []
 
 try:

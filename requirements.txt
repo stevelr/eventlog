@@ -1,4 +1,4 @@
 # eventlog/requirements.txt
 ujson>=1.35
--e git://github.com/iskme/python-log-async.git#egg=python-log-async
+-e ../python-log-async
 six

@@ -1,6 +1,5 @@
 import inspect
 import os
-import sys
 
 _getUserContext = None
 
@@ -17,16 +16,11 @@ def initMiddleware(getUserContext):
         _getUserContext = getUserContext
 
 
-# returns current django request object if available
-# def getRequest():
-#    return _getRequest and _getRequest() or None
-
-
 # get configuration from environment variable
 #  or, if in django, from django.settings
 #  If defined in both, environment takes precedence
-#  If defined in neither, a warning is printed and None is returned
-def getConfigSetting(key):
+#  If defined in neither, returns defaultVal
+def getConfigSetting(key, defaultVal=None):
     val = os.environ.get(key, None)
     if val is None and os.environ.get('DJANGO_SETTINGS_MODULE', None):
         try:
@@ -34,6 +28,4 @@ def getConfigSetting(key):
             val = getattr(settings, key, None)
         except ImportError:
             pass
-    if val is None:
-        sys.stderr.write("Warning: %s not defined\n" % key)
-    return val
+    return val or defaultVal
