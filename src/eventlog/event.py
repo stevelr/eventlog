@@ -37,7 +37,7 @@ class LogLevel:
             LogLevel.NOTSET: "_",
             LogLevel.INFO: "INFO",
             LogLevel.OK: "OK",
-            LogLevel.WARN: "WARNING",
+            LogLevel.WARN: "WARN",
             LogLevel.ERROR: "ERROR",
             LogLevel.CRITICAL: "CRITICAL",
             LogLevel.EXTREME: "EXTREME",

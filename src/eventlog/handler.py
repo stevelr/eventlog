@@ -51,23 +51,32 @@ class EventLogger(AsynchronousLogHandler):
         super(EventLogger, self).__init__(*args, **kwargs)
         self.serialize = ser
         self.formatter = EventFormatter(self.getSerializer)
+        self.altLogger = None
 
-    # add event to queue for sending to logstash
+    # add event to queue for sending to log forwarder
     # queue is persistent locally (via sqlite) so this should work
-    # even if logstash is down briefly.
+    # even if the log forwarder is down briefly.
     # All events passed are logged,
-    # regardless of the logging level of the handler.
-    #
-    # param e: a subclass of Event
-    #
+    # regardless of the logging level of the handler
     def logEvent(self, event):
+        if self._enable:
+            data = self.serialize(event.toDict())
+            self._logData(data)
 
-        stream = self.serialize(event.toDict())
+        # if an alt logger has been set up, copy logs there
+        # if the alt logger throws an exception, it will block this logger
+        if self.altLogger:
+            self.altLogger.logEvent(event)
+
+    # Internal method that logs byte stream
+    def _logData(self, data):
+
+        # on first send, set up worker thread and network transport
         self._setup_transport()
         self._start_worker_thread()
 
         try:
-            AsynchronousLogHandler._worker_thread.enqueue_event(stream)
+            AsynchronousLogHandler._worker_thread.enqueue_event(data)
         except (KeyboardInterrupt, SystemExit):
             raise
         except Exception:
@@ -76,10 +85,17 @@ class EventLogger(AsynchronousLogHandler):
             # or if there's some other bug in this package
             if sys.stderr:
                 sys.stderr.write("\n\n--- logEvent FAIL. Event not logged ---\n")
-                sys.stderr.write(stream)
+                sys.stderr.write(data)
                 sys.stderr.wrtie('\n')
                 t, v, tb = sys.exc_info()
                 traceback.print_exception(t, v, tb, None, sys.stderr)
+
+    # override emit to make everything go through logEvent
+    def emit(self, record):
+        if not self._enable:
+            return  # we should not do anything, so just leave
+        event = LogRecordEvent(record)
+        self.logEvent(event)
 
     # Create a Counter/Gauge value that logs all changes.
     def createTrackingValue(self, name, target, initialValue=0, fields={}):
@@ -100,11 +116,27 @@ class EventLogger(AsynchronousLogHandler):
         new_ser = lambda evDict: ser(filter(evDict))
         self.setSerializer(new_ser)
 
+    # add secondary logger (usually a ConsoleEventLogger)
+    def copyLogsTo(self, altLogger):
+        # catch accidental loops (at 0 or 1-deep)
+        if altLogger is None or altLogger == self or altLogger.altLogger == self:
+            raise Exception("Invalid parameter. Loops not allowed.")
+        self.altLogger = altLogger
 
+
+# LoggingValue can be used as a Counter or Gauge
+# that logs events for all changes to its value
+# It can be initialized with template event fields (target,fields)
+# that are used for generated events
 class _LoggingValue(object):
+
     # Create a Logging value that will log all changes to its state
     # @param eventLogger - how the event will be logged
-    # @param logInit - set to true if you want the construction logged
+    # @param target - message target, used in all subsequent events
+    # @param initialValue - initial value of counter
+    # @param fields - initial set of fields that will be applied
+    #            to all subsequent events, unless overridden by
+    #            the 'params' field of an inc() or set() invocation
     def __init__(self,
                  eventLogger,
                  name,
@@ -118,21 +150,9 @@ class _LoggingValue(object):
         self.value = initialValue
         self.fields = fields
 
-    def makeEvent(self, message=None):
-        e = Event(name=self.name,
-                  target=self.target,
-                  value=self.value,
-                  message=message,
-                  fields=self.fields)
-        return e
-
-    def logEvent(self, e):
-        self.eventLogger.logEvent(e)
-
-    # log value, with optional additional parameters
-    # the full set of parameters will be the defaultFields
-    # initialized in the constructor, with params added on.
-    # the inherent fields are not modified
+    # Set a new value and log it, with optional additional parameters.
+    # The Event is generated from the target and default fields from the
+    # constructor, plus the value, new params, message and level
     def set(self, value, params={}, message=None, level=LogLevel.INFO):
         f = copy(self.fields)
         self.value = value
@@ -144,12 +164,18 @@ class _LoggingValue(object):
                   value=value,
                   fields=f,
                   message=message)
-        self.logEvent(e)
+        self.eventLogger.logEvent(e)
 
+    # Increment Counter
+    # @param delta amount to increment, default 1
+    # @param params optional additional fields to log in event.fields
+    # @param message optional message
     def inc(self, delta=1, params={}, message=None):
-        self.set(self.value + 1, params=params, message=message)
+        self.set(self.value + delta, params=params, message=message)
 
     # Returns reference to the internal fields
+    # Fields may be adjusted by caller. It is caller's responsibility
+    # to ensure thread safety for modifications to the fields dict
     def fields(self):
         return self.fields
 
@@ -165,67 +191,69 @@ def print_dict(d):
 
 
 # default format for line 1 format
-# omitted: loc,host,pid {loc}{host}.{pid}
-_CONSOLE_LINE1_FORMAT = "{tstamp:<12} {name:<15} {level} v:{value} t:{target} m:{message}"
-
-
-_CONSOLE_LINE2_INDENT = 30
+_CONSOLE_LINE1_FORMAT = "{tstamp:<12} {level:<5} {name}:{target} ({value}) {message}"
+_CONSOLE_LINE2_FORMAT = ' ' * 34 + "{host}.{pid} {code} {other}"
+# Any event fields not listed here will be included in 'other'
+_not_other = ('code', 'codeFile', 'codeFunc', 'codeLine', 'host', 'level',
+              'message', 'name', 'pid', 'target', 'tstamp', 'value', 'version')
 
 
 # format for compact and human readable console output
-# @param line1Format format string for console output
+# @param line1Format format string for console output line 1
+# @param line2Format format string for line 2
+# only line 1 is generated if line 2 is blank
 # @param delim newline delimeter
-def format_console(evDict, line1Format, delim=b'\n'):
-    p = copy(evDict)  # copy dict so this fn is non-destructive
-    line2_indent = ' ' * _CONSOLE_LINE2_INDENT
-    # compute first line display
-    l1 = {}
-    # fix tstamp to show milliseconds (sec.000)
-    ts = p.pop("tstamp")
-    l1["tstamp"] = math.floor(ts * 1000) / 1000 if isinstance(ts, float) else ts
-    target = p.pop("target", "")
-    l1["target"] = target is not None and str(target) or ""
-    l1["level"] = LogLevel.toString(p.pop("level"))
-    for k in ("host", "pid", "site", "cluster", "message", "name", "value"):
-        l1[k] = p.pop(k, "")
-    l1["loc"] = (l1["site"] or l1["cluster"]) and "{site}.{cluster}." or ""
-    disp = line1Format.format(**l1)
-    p.pop("version")  # don't log version
-    file = p.pop("codeFile", "")
-    func = p.pop("codeFunc", "")
-    lineNo = str(p.pop("codeLine", ""))
+def format_console(evDict, line1Format, line2Format, delim=b'\n'):
+    p = copy(evDict)  # copy dict so we don't modify evDict param
+    keys = set(p.keys())
+
+    # fix tstamp to show seconds + %.3f millis
+    # if integer already, leave as-is
+    ts = p["tstamp"]
+    p["tstamp"] = math.floor(ts * 1000) / 1000 if isinstance(ts, float) else ts
+    # convert level (int) to string name
+    p["level"] = LogLevel.toString(p["level"])
+    # replace None with empty string
+    for f in ('value', 'target', 'message'):
+        if p.get(f, None) is None:
+            p[f] = ""
+    # meta-field "code" combines func, file, lineo
+    file = p.get("codeFile", "")
+    func = p.get("codeFunc", "")
+    lineNo = str(p.get("codeLine", ""))
     if file and lineNo:
-        p["code"] = "%s|%s|%s" % (os.path.basename(file), func, lineNo)
-    if p:
-        # if any more fields, add second line
-        line2 = line2_indent + print_dict(p)
-        disp = disp + delim + line2
-    return disp
+        p["code"] = "%s|%s@%s" % (func, os.path.basename(file), lineNo)
+    else:
+        p["code"] = ""
+
+    # remove fields used in line 1 to determine 'other' for line 2
+    other = keys.difference(_not_other)
+    p['other'] = print_dict({k: p[k] for k in other})
+
+    # generate line1 and, if non-blank, line 2
+    line1 = line1Format.format(**p)
+    line2 = line2Format.format(**p)
+    out = line1 + delim + line2 if line2.strip() else line1
+    # console writer adds final \n
+    return out
 
 
 # log to console (or a writable stream) instead of sending to logstash
 # also doesn't create worker thread
 class ConsoleEventLogger(EventLogger):
 
-    def __init__(self, ch=sys.stdout, delim=b'\n', line1Format=_CONSOLE_LINE1_FORMAT):
+    def __init__(self, ch=sys.stdout, delim=b'\n',
+                 line1Format=_CONSOLE_LINE1_FORMAT,
+                 line2Format=_CONSOLE_LINE2_FORMAT):
         self.delim = delim.decode() if six.PY3 and isinstance(delim, bytes) else delim
         super(ConsoleEventLogger, self).__init__(
             host='', port=0,
-            serialize=lambda ed: format_console(ed, line1Format, self.delim))
+            serialize=lambda ed: format_console(ed, line1Format, line2Format, self.delim))
         self.ch = ch
 
-    # override emit to prevent asynchronous behavior
-    def emit(self, record):
-        evDict = LogRecordEvent(record).toDict()
-        data = self.serialize(evDict)
-        self.writeln(data)
-
-    def logEvent(self, event):
-        data = self.serialize(event.toDict())
-        self.writeln(data)
-
+    # overriding _logData prevents asynchronous sending
     # write a buffer to output channel and terminate with newline
-    def writeln(self, buf):
+    def _logData(self, buf):
         if six.PY3 and isinstance(buf, bytes):
             self.ch.write(buf.decode())
         else:
