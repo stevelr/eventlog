@@ -1,4 +1,5 @@
-#
+# proto.py
+
 import six
 
 try:
@@ -14,14 +15,19 @@ try:
 except ImportError:
     import json
 
+# compact json dump
+json_str = lambda d: json.dumps(d, separators=(',', ':'))
+# compact json dump with sorted keys
+json_str_sort = lambda d: json.dumps(d, sort_keys=True, separators=(',', ':'))
+
 
 # format_json serialize event as json
 def format_json(evDict):
     if six.PY2:
-        return json.dumps(evDict) + '\n'
+        return json_str(evDict) + '\n'
     else:
         # serialize to json string, then encode(utf8) to byte array
-        return bytes(json.dumps(evDict, 'utf-8')) + b'\n'
+        return bytes(json_str(evDict), 'utf-8') + b'\n'
 
 
 # format_capnp serialize event as binary capnp proto

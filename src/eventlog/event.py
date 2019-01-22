@@ -29,15 +29,29 @@ class LogLevel:
     MIN_VALUE = TRACE
     MAX_VALUE = EXTREME
 
+    @staticmethod
+    def toString(level):
+        _val2str = {
+            LogLevel.TRACE: "TRACE",
+            LogLevel.DEBUG: "DEBUG",
+            LogLevel.NOTSET: "_",
+            LogLevel.INFO: "INFO",
+            LogLevel.OK: "OK",
+            LogLevel.WARN: "WARNING",
+            LogLevel.ERROR: "ERROR",
+            LogLevel.CRITICAL: "CRITICAL",
+            LogLevel.EXTREME: "EXTREME",
+        }
+        return _val2str.get(level, "")
 
-# returns integer log level from name, e.g., "DEBUG" returns 3
-# if not found, returns KeyError
-def LogLevelValueOf(s):
-    s = s.upper()
-    try:
-        return getattr(LogLevel, s)
-    except AttributeError:
-        raise KeyError(s, "Invalid log level")
+    # returns integer log level from name, e.g., "DEBUG" returns 3
+    # if not found, returns KeyError
+    @staticmethod
+    def valueOf(levelName):
+        try:
+            return getattr(LogLevel, levelName.upper())
+        except AttributeError:
+            raise KeyError(levelName, "Invalid log level")
 
 
 class Event(object):
@@ -116,7 +130,7 @@ class Event(object):
         if isinstance(level, six.integer_types):
             lv = level
         elif isinstance(level, six.string_types):
-            lv = LogLevelValueOf(level)
+            lv = LogLevel.valueOf(level)
         else:
             raise Exception("Invalid level: " + str(level))
         if lv < LogLevel.MIN_VALUE or lv > LogLevel.MAX_VALUE:
@@ -169,11 +183,11 @@ class Event(object):
         return self._d
 
     def set(self, key, val):
-        self._d['key'] = val
+        self._d[key] = val
 
     def setIfNN(self, key, val):
         if val is not None:
-            self._d['key'] = val
+            self._d[key] = val
 
 
 # LogRecordEvent - an Event wrapper around a python logging Record
@@ -185,7 +199,6 @@ class LogRecordEvent(Event):
             target='logger:' + record.name,
             level=record.levelname,
             message=record.getMessage(),
-            fields={'level': record.levelname.lower()},
             logFrame=True,
         )
         if record.created:

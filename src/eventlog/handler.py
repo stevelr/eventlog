@@ -1,4 +1,6 @@
 import logging
+import math
+import os
 import sys
 import traceback
 from copy import copy
@@ -8,7 +10,7 @@ import six
 from log_async.handler import AsynchronousLogHandler
 
 from .config import getConfigSetting
-from .event import Event, LogRecordEvent
+from .event import Event, LogLevel, LogRecordEvent
 from .proto import getSerializer
 
 
@@ -131,13 +133,14 @@ class _LoggingValue(object):
     # the full set of parameters will be the defaultFields
     # initialized in the constructor, with params added on.
     # the inherent fields are not modified
-    def set(self, value, params={}, message=None):
+    def set(self, value, params={}, message=None, level=LogLevel.INFO):
         f = copy(self.fields)
         self.value = value
         for k, v in six.iteritems(params):
             f[k] = v
         e = Event(self.name,
                   self.target,
+                  level=level,
                   value=value,
                   fields=f,
                   message=message)
@@ -151,20 +154,65 @@ class _LoggingValue(object):
         return self.fields
 
 
+# returns compact display of dict for human readability
+def print_dict(d):
+    s = ''
+    for k in sorted(d.keys()):
+        val = d[k]
+        val = isinstance(val, dict) and ('{' + print_dict(val) + '}') or str(val)
+        s = s + k + ':' + val + ' '
+    return s[:-1]  # remove trailing space
+
+
+# default format for line 1 format
+# omitted: loc,host,pid {loc}{host}.{pid}
+_CONSOLE_LINE1_FORMAT = "{tstamp:<12} {name:<15} {level} v:{value} t:{target} m:{message}"
+
+
+_CONSOLE_LINE2_INDENT = 30
+
+
+# format for compact and human readable console output
+# @param line1Format format string for console output
+# @param delim newline delimeter
+def format_console(evDict, line1Format, delim=b'\n'):
+    p = copy(evDict)  # copy dict so this fn is non-destructive
+    line2_indent = ' ' * _CONSOLE_LINE2_INDENT
+    # compute first line display
+    l1 = {}
+    # fix tstamp to show milliseconds (sec.000)
+    ts = p.pop("tstamp")
+    l1["tstamp"] = math.floor(ts * 1000) / 1000 if isinstance(ts, float) else ts
+    target = p.pop("target", "")
+    l1["target"] = target is not None and str(target) or ""
+    l1["level"] = LogLevel.toString(p.pop("level"))
+    for k in ("host", "pid", "site", "cluster", "message", "name", "value"):
+        l1[k] = p.pop(k, "")
+    l1["loc"] = (l1["site"] or l1["cluster"]) and "{site}.{cluster}." or ""
+    disp = line1Format.format(**l1)
+    p.pop("version")  # don't log version
+    file = p.pop("codeFile", "")
+    func = p.pop("codeFunc", "")
+    lineNo = str(p.pop("codeLine", ""))
+    if file and lineNo:
+        p["code"] = "%s|%s|%s" % (os.path.basename(file), func, lineNo)
+    if p:
+        # if any more fields, add second line
+        line2 = line2_indent + print_dict(p)
+        disp = disp + delim + line2
+    return disp
+
+
 # log to console (or a writable stream) instead of sending to logstash
 # also doesn't create worker thread
-# TODO: a non-json serializer would be more readable
 class ConsoleEventLogger(EventLogger):
 
-    def __init__(self, ch=sys.stdout, delim=b'\n'):
+    def __init__(self, ch=sys.stdout, delim=b'\n', line1Format=_CONSOLE_LINE1_FORMAT):
+        self.delim = delim.decode() if six.PY3 and isinstance(delim, bytes) else delim
         super(ConsoleEventLogger, self).__init__(
             host='', port=0,
-            serialize=getSerializer())
+            serialize=lambda ed: format_console(ed, line1Format, self.delim))
         self.ch = ch
-        self.delim = delim
-        if six.PY3:
-            if isinstance(delim, bytes):
-                self.delim = delim.decode()
 
     # override emit to prevent asynchronous behavior
     def emit(self, record):
