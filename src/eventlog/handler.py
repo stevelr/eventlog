@@ -7,9 +7,6 @@ from copy import copy
 
 import six
 
-from log_async.handler import AsynchronousLogHandler
-
-from .config import getConfigSetting
 from .event import Event, LogLevel, LogRecordEvent
 from .proto import getSerializer
 
@@ -31,10 +28,7 @@ class EventFormatter(logging.Formatter):
         return self.getSerializerFn()(e)
 
 
-# EventLogger sends events to a forwarding server,
-#        after queuing them in a local sqlite database.
-#        The sqlite database ensures that events are logged even if the
-#        forwarding server process is temporarily unavailable.
+# EventHandler sends events over the network via a Transport
 #
 #    In addition to sending regular events with the logEvent() method,
 #    this class also works as a logging handler (with logger.addHandler()
@@ -44,56 +38,68 @@ class EventFormatter(logging.Formatter):
 #    transmit events if the logger is enabled for events at that level.
 #    Events sent through logEvent() are logged always, regardless
 #    of the logger's level.
-class EventLogger(AsynchronousLogHandler):
+#
+#    EventHandler may have a replica, which receives a copy of all events.
+#    This is similar to the concept of logging.addHandler(), except that replica
+#    works for all events, not just python logging records.
+#
+#    An optional fallback transport may be provided in case the
+#    primary transport fails. For complete recovery, the fallback transport
+#    should be accompanied by scripts or other mechanism to forward
+#    archived events over the network once primary transport is restored.
+#    In addition, if fallback transport is disk-based, or memory-based,
+#    care should be taken to prevent filling disk or memory.
+class EventHandler(logging.Handler):
 
-    def __init__(self, *args, **kwargs):
-        ser = kwargs.pop('serialize') or getSerializer()
-        super(EventLogger, self).__init__(*args, **kwargs)
-        self.serialize = ser
+    # Initialize EventHandler
+    # @param serialize function for turning event into byte stream
+    # @param transport method of sending events to remote logger
+    # @param replica optional handler for sending copies of events
+    #        (for example, to send to console)
+    # @param fallbackTx optional fallback transport in case primary tx
+    #        fails to send
+    def __init__(self, serialize, transport,
+                 replica=None, fallbackTx=None):
+        super(EventHandler, self).__init__()
+        self.serialize = serialize or getSerializer()
         self.formatter = EventFormatter(self.getSerializer)
-        self.altLogger = None
+        self.transport = transport
+        self.replica = replica
+        self.fallbackTx = fallbackTx
 
     # add event to queue for sending to log forwarder
     # queue is persistent locally (via sqlite) so this should work
     # even if the log forwarder is down briefly.
-    # All events passed are logged,
-    # regardless of the logging level of the handler
+    # If either primary or replica transport hangs, it will block
+    # the current thread.
     def logEvent(self, event):
-        if self._enable:
-            data = self.serialize(event.toDict())
-            self._logData(data)
+        data = self.serialize(event.toDict())
+        self._sendData(data)
 
-        # if an alt logger has been set up, copy logs there
-        # if the alt logger throws an exception, it will block this logger
-        if self.altLogger:
-            self.altLogger.logEvent(event)
+        # if a replica handler has been set up, copy logs there
+        if self.replica:
+            self.replica.logEvent(event)
 
+    # send byte stream through transport
     # Internal method that logs byte stream
-    def _logData(self, data):
-
-        # on first send, set up worker thread and network transport
-        self._setup_transport()
-        self._start_worker_thread()
+    def _sendData(self, data):
 
         try:
-            AsynchronousLogHandler._worker_thread.enqueue_event(data)
-        except (KeyboardInterrupt, SystemExit):
-            raise
+            self.transport.send([data, ])
         except Exception:
-            # If event can't be sent to logstash, worker thread writes to sqlite.
-            # This ex should only occur if write to sqlite (on local filesystem) failed,
-            # or if there's some other bug in this package
-            if sys.stderr:
-                sys.stderr.write("\n\n--- logEvent FAIL. Event not logged ---\n")
+            sys.stderr.write("ERROR - Primary event transport failed, using fallback\n")
+            try:
+                # if fallback fails, then throw new exception
+                self.fallbackTx.send([data, ])
+            except Exception:
+                sys.stderr.write("CRITICAL - Fallback event transport failed\n")
                 sys.stderr.write(data)
-                sys.stderr.wrtie('\n')
                 t, v, tb = sys.exc_info()
                 traceback.print_exception(t, v, tb, None, sys.stderr)
+                raise
 
     # override emit to make everything go through logEvent
     def emit(self, record):
-        if not self._enable:
-            return  # we should not do anything, so just leave
         event = LogRecordEvent(record)
         self.logEvent(event)
 
@@ -116,12 +122,19 @@ class EventLogger(AsynchronousLogHandler):
         new_ser = lambda evDict: ser(filter(evDict))
         self.setSerializer(new_ser)
 
-    # add secondary logger (usually a ConsoleEventLogger)
-    def copyLogsTo(self, altLogger):
+    # add secondary handler (usually a ConsoleEventHandler)
+    # if parameter is None, disables secondary handler
+    def setReplica(self, replica):
         # catch accidental loops (at 0 or 1-deep)
-        if altLogger is None or altLogger == self or altLogger.altLogger == self:
-            raise Exception("Invalid parameter. Loops not allowed.")
-        self.altLogger = altLogger
+        if replica is not None:
+            if replica == self or replica.replica == self:
+                raise Exception("Invalid parameter. Loops not allowed.")
+        self.replica = replica
+
+    def setFallbackTransport(self, fallback):
+        if fallback is not None and fallback == self.fallbackTx:
+            raise Exception("Fallback transport may not be the same as primary")
+        self.fallbackTx = fallback
 
 
 # LoggingValue can be used as a Counter or Gauge
@@ -131,20 +144,20 @@ class EventLogger(AsynchronousLogHandler):
 class _LoggingValue(object):
 
     # Create a Logging value that will log all changes to its state
-    # @param eventLogger - how the event will be logged
+    # @param EventHandler - how the event will be logged
     # @param target - message target, used in all subsequent events
     # @param initialValue - initial value of counter
     # @param fields - initial set of fields that will be applied
     #            to all subsequent events, unless overridden by
     #            the 'params' field of an inc() or set() invocation
     def __init__(self,
-                 eventLogger,
+                 eventHandler,
                  name,
                  target='',
                  initialValue=0,
                  fields={}
                  ):
-        self.eventLogger = eventLogger
+        self.eventHandler = eventHandler
         self.name = name
         self.target = target
         self.value = initialValue
@@ -152,7 +165,10 @@ class _LoggingValue(object):
 
     # Set a new value and log it, with optional additional parameters.
     # The Event is generated from the target and default fields from the
-    # constructor, plus the value, new params, message and level
+    # constructor, plus the value, new params, message and level.
+    # The event is transmitted regardless of information level; level is
+    # intended to be used for downstream filtering and alerting.
+    # @param value should be numeric or string.
     def set(self, value, params={}, message=None, level=LogLevel.INFO):
         f = copy(self.fields)
         self.value = value
@@ -164,7 +180,11 @@ class _LoggingValue(object):
                   value=value,
                   fields=f,
                   message=message)
-        self.eventLogger.logEvent(e)
+        self.eventHandler.logEvent(e)
+
+    # get returns the current value of the counter or gauge
+    def get(self):
+        return self.value
 
     # Increment Counter
     # @param delta amount to increment, default 1
@@ -240,56 +260,23 @@ def format_console(evDict, line1Format, line2Format, delim=b'\n'):
 
 # log to console (or a writable stream) instead of sending to logstash
 # also doesn't create worker thread
-class ConsoleEventLogger(EventLogger):
+class ConsoleEventHandler(EventHandler):
 
     def __init__(self, ch=sys.stdout, delim=b'\n',
                  line1Format=_CONSOLE_LINE1_FORMAT,
                  line2Format=_CONSOLE_LINE2_FORMAT):
         self.delim = delim.decode() if six.PY3 and isinstance(delim, bytes) else delim
-        super(ConsoleEventLogger, self).__init__(
-            host='', port=0,
-            serialize=lambda ed: format_console(ed, line1Format, line2Format, self.delim))
+        super(ConsoleEventHandler, self).__init__(
+            serialize=lambda ed: format_console(ed, line1Format, line2Format, self.delim),
+            transport=None
+        )
         self.ch = ch
 
     # overriding _logData prevents asynchronous sending
     # write a buffer to output channel and terminate with newline
-    def _logData(self, buf):
+    def _sendData(self, buf):
         if six.PY3 and isinstance(buf, bytes):
             self.ch.write(buf.decode())
         else:
             self.ch.write(buf)
         self.ch.write(self.delim)
-
-
-# internal global for default loger
-_systemDefaultAsyncLogger = None
-
-
-# Return system default async event logger, creating it if necessary
-# Uses configuration provided by environment variables
-def defaultAsyncLogger():
-    global _systemDefaultAsyncLogger
-    if _systemDefaultAsyncLogger is None:
-        logHost = getConfigSetting('EVENTLOG_HOST')
-        streamFmt = getConfigSetting('EVENTLOG_FORMAT')
-        serialize = getSerializer(streamFmt)
-
-        if logHost == 'console' or not logHost:
-            # If logstash connection properties are not set,
-            # events will log to the console
-            logger = ConsoleEventLogger()
-        else:
-            logPort = getConfigSetting('EVENTLOG_PORT')
-            logPort = logPort and int(logPort) or 5001
-            logger = EventLogger(
-                host=logHost,
-                port=logPort,
-                database_path=getConfigSetting('EVENTLOG_DB'),
-                serialize=serialize)
-        _systemDefaultAsyncLogger = logger
-    return _systemDefaultAsyncLogger
-
-
-# convenience function
-def logEvent(e):
-    defaultAsyncLogger().logEvent(e)

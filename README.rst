@@ -1,28 +1,12 @@
-Asynchronous Event logging
-==========================
+Event logging and forwarding
+============================
 
 Library for gathering events and logs and forwarding them to a
 remote log server or log forwarder. Events are generated either by
 construction of an Event object, or though the python logging handler
 (which wraps log messages in an Event); then serialized with
 a pluggable formatter (json, msgpack/fluent, capnproto);
-then forwarded to a remote logging handler. The python-log-async library
-performs bufering and forwarding to a TCP or UDP based log server.
-
-To minimize the delay to the main application thread, events are added to
-a local queue, and control is returned to the main thread immediately.
-There are some provisions to improve reliability in the event of
-server and network failures: graceful shutdown,
-retries for dropped connections, internal queuing,
-and prometheus monitoring; however, this library
-does not provide Guaranteed Message Delivery. The strategy
-for minimizing risk of message loss is to get the events and logs
-off the production server as quickly as posisble and persisted
-in an upstream reliable storage such as a Kafka cluster or Google PubSub.
-
-This packages builds upon python-log-async,
-a fork of logstash-async, which provides the local persistent queue (sqlite),
-worker thread, and asynchronous sending to logstash.
+then forwarded to a remote logging handler.
 
 This package includes the following capabilities:
 * a standardized but flexible Event object schema designed
@@ -35,6 +19,9 @@ This package includes the following capabilities:
 * A logging handler compatible with python logging,
   so application logs can be integrated with event logs
   (log messages are wrapped with an Event object)
+* Ability to clone the log stream (so it can go remote + to console),
+  and to configure a fallback log stream (so you can log to file if network
+  is unavailable).
 * support for the django-eventlog middleware
   for logging http events and associating application Events
   with the current user session and http request
@@ -50,7 +37,8 @@ Tested with python 2.7+ and 3.6+.
     pip install eventlog-<version>.tar.gz
 ```
 
-Set the following environment variables. If you are using django, you can define these in site/settings.py
+Set the following environment variables. If you are using django, you can alternately
+define these in site/settings.py
 ```
     # logstash server connection
     EVENTLOG_HOST = '172.17.0.1'
@@ -73,11 +61,11 @@ When used in this way, log() messages are converted to Event objects and sent as
 to a remote log forwarder (e.g., logstash, fluentd, or google pubsub)
 
 ```
-    from eventlog import defaultAsyncLogger
+    from eventlog import defaultEventHandler
     import logging
 
     logger = logging.getLogger('my-app')
-    logger.addHandler(defaultAsyncLogger())
+    logger.addHandler(defaultEventHandler())
 
     logger.info("some message")
 ```

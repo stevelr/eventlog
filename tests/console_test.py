@@ -1,6 +1,6 @@
 import unittest
 
-from eventlog import Event, EventLogger, ConsoleEventLogger, formatTstampAsMillis
+from eventlog import Event, EventHandler, ConsoleEventHandler, formatTstampAsMillis
 from logging import getLogger, DEBUG, INFO
 
 def viewResource(resourceId):
@@ -12,29 +12,28 @@ def editResource(resourceId, comment=None):
 class ConsoleLogTest(unittest.TestCase):
 
     def setUp(self):
-        self.consoleLogger = ConsoleEventLogger()
+        self.consoleHandler = ConsoleEventHandler()
         # format timestamps as milliseconds
         #self.consoleLogger.addFilter(formatTstampAsMillis)
 
         log = getLogger()
-        log.addHandler(self.consoleLogger)
-        log.setLevel(DEBUG)
+        log.addHandler(self.consoleHandler)
         self.log = log
 
     def tearDown(self):
         pass
 
     def test_full(self):
-        self.log.info("an info message")
         self.log.debug("a debug message")
-
+        self.log.info("an info message")
+        self.log.warn("a warning message")
+        self.log.critical("a critical messase")
         self.assertTrue(True)
 
     def test_event(self):
         event = viewResource('alice-in-wonderland')
-        self.consoleLogger.logEvent(event)
+        self.consoleHandler.logEvent(event)
         self.assertTrue(event is not None)
 
         ev2 = editResource('my-workbook', comment="added table of contents")
-        self.consoleLogger.logEvent(ev2)
-        
+        self.consoleHandler.logEvent(ev2)

@@ -4,6 +4,8 @@ import sys
 import time
 import traceback
 
+from logging import addLevelName
+
 import six
 from .config import _getUserContext, getConfigSetting
 
@@ -12,21 +14,22 @@ try:
 except ImportError:
     import json
 
-_EVENT_SCHEMA_VERSION = 0.9  # major.minor
+_EVENT_SCHEMA_VERSION = 0.95  # major.minor
 
 
 class LogLevel:
-    TRACE = -4
-    DEBUG = -3
-    NOTSET = -2          # value when level is not specified
-    INFO = -1            # informational message, no error condition
-    OK = 0               # status: systems operating normally
-    WARNING = WARN = 1   # warning condition, may need attention
-    ERROR = ERR = 2      # error condition, not operating normally
-    CRITICAL = CRIT = 3  # system critical
-    EXTREME = 4          # more urgent than critical
+    NOTSET = 0            # value when level is not specified
 
-    MIN_VALUE = TRACE
+    TRACE = 5
+    DEBUG = 10
+    INFO = 20             # informational message, no error condition
+    OK = 25               # status: systems operating normally
+    WARNING = WARN = 30   # warning condition, may need attention
+    ERROR = ERR = 40      # error condition, not operating normally
+    CRITICAL = CRIT = 50  # system critical
+    EXTREME = 60          # more urgent than critical
+
+    MIN_VALUE = NOTSET
     MAX_VALUE = EXTREME
 
     @staticmethod
@@ -52,6 +55,13 @@ class LogLevel:
             return getattr(LogLevel, levelName.upper())
         except AttributeError:
             raise KeyError(levelName, "Invalid log level")
+
+    # optionally, register our additional levels with python logging stack
+    @staticmethod
+    def registerLevels():
+        addLevelName(LogLevel.TRACE, 'TRACE')
+        addLevelName(LogLevel.EXTREME, 'EXTREME')
+        addLevelName(LogLevel.OK, 'OK')
 
 
 class Event(object):
@@ -88,7 +98,7 @@ class Event(object):
                  name,
                  target,
                  value=None,
-                 level=LogLevel.NOTSET,
+                 level=LogLevel.OK,
                  message=None,
                  fields=None,
                  logFrame=False,
@@ -216,4 +226,4 @@ class LogRecordEvent(Event):
                 'exc_info': json.dumps((excType, val, tbdata)),
             })
             if self._d == LogLevel.NOTSET:
-                self.set('level', LogLevel.ERROR)
+                self.set('level', LogLevel.INFO)

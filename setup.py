@@ -4,7 +4,7 @@ from os import path
 from setuptools import setup
 
 NAME = "eventlog"
-VERSION = "0.9.101"  # keep in sync with src/eventlog/__init__.py
+VERSION = "0.9.102"  # keep in sync with src/eventlog/__init__.py
 requires = []
 
 try:
@@ -19,11 +19,10 @@ here = path.abspath(path.dirname(__file__))
 with open(path.join(here, 'README.rst'), "rb") as fobj:
     long_description = format_md(fobj.read().decode('utf-8'))
 
-
 setup(
     name=NAME,
     version=VERSION,
-    description="Asynchronous event logging",
+    description="Network event logging",
     long_description=long_description,
     author="",
     author_email="email@example.com",
@@ -41,7 +40,7 @@ setup(
         'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 3',
     ],
-    keywords="eventlog logging asynchronous analytics metrics logstash fluent pubsub",
+    keywords="eventlog logging analytics metrics fluent pubsub",
     packages=["eventlog"],
     package_dir={"": "src"},
     requires=requires
