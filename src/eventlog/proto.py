@@ -12,13 +12,11 @@ except ImportError:
 
 try:
     import ujson as json
+    json_str = json.dumps
 except ImportError:
     import json
-
-# compact json dump
-json_str = lambda d: json.dumps(d, separators=(',', ':'))
-# compact json dump with sorted keys
-json_str_sort = lambda d: json.dumps(d, sort_keys=True, separators=(',', ':'))
+    # compact json dump
+    json_str = lambda d: json.dumps(d, separators=(',', ':'))
 
 
 # format_json serialize event as json
