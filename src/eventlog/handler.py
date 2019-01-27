@@ -83,20 +83,23 @@ class EventHandler(logging.Handler):
     # send byte stream through transport
     # Internal method that logs byte stream
     def _sendData(self, data):
-
         try:
             self.transport.send([data, ])
         except Exception:
-            sys.stderr.write("ERROR - Primary event transport failed, using fallback\n")
-            try:
-                # if fallback fails, then throw new exception
-                self.fallbackTx.send([data, ])
-            except Exception:
-                sys.stderr.write("CRITICAL - Fallback event transport failed\n")
-                sys.stderr.write(data)
-                t, v, tb = sys.exc_info()
-                traceback.print_exception(t, v, tb, None, sys.stderr)
-                raise
+            errLog = sys.stderr
+            if self.fallbackTx:
+                errLog.write("ERROR: Event transport failed, trying fallback\n")
+                try:
+                    # if fallback fails, then throw new exception
+                    self.fallbackTx.send([data, ])
+                except Exception:
+                    errLog.write("CRITICAL: Fallback event transport failed\n")
+                    errLog.write(data)
+                    t, v, tb = sys.exc_info()
+                    traceback.print_exception(t, v, tb, None, errLog)
+                    raise
+            else:
+                errLog.write("ERROR: Event transport failed and no fallback is defined\n")
 
     # override emit to make everything go through logEvent
     def emit(self, record):
@@ -135,6 +138,11 @@ class EventHandler(logging.Handler):
         if fallback is not None and fallback == self.fallbackTx:
             raise Exception("Fallback transport may not be the same as primary")
         self.fallbackTx = fallback
+
+    # isRemote returns True if there is a network transport,
+    # or False if this is a console or file handler
+    def isRemote(self):
+        return self.transport is not None
 
 
 # LoggingValue can be used as a Counter or Gauge
