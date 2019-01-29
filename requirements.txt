@@ -1,3 +1,4 @@
 # eventlog/requirements.txt
+msgpack
 ujson>=1.35
 six

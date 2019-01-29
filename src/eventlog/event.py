@@ -1,4 +1,5 @@
 import os
+import six
 import socket
 import sys
 import time
@@ -14,8 +15,10 @@ try:
 except ImportError:
     import json
 
-_EVENT_SCHEMA_VERSION = 0.95  # major.minor
+_EVENT_SCHEMA_VERSION = (0, 1)   # major.minor (uint8,uint8)
 
+# _isnumeric returns True if parameter is a numeric type (int, long, float)
+_isnumeric = lambda x: isinstance(x, six.integer_types) or isinstance(x, float)
 
 class LogLevel:
     NOTSET = 0            # value when level is not specified
@@ -63,6 +66,24 @@ class LogLevel:
         addLevelName(LogLevel.EXTREME, 'EXTREME')
         addLevelName(LogLevel.OK, 'OK')
 
+class FVal(object):
+
+
+    # Creates a string field value
+    @staticmethod
+    def sval(name, string_val):
+        return {'name':name, 'sval':string_val}
+
+    # Creates a float field value
+    @staticmethod
+    def fval(name, float_val):
+        return {'name':name, 'fval':float_val}
+
+    # Creates an int field value
+    @staticmethod
+    def ival(name, int_val):
+        return {'name':name, 'ival':int_val}
+
 
 class Event(object):
 
@@ -79,14 +100,17 @@ class Event(object):
     '''Eventlog constructor
        @param name the event name
        @param target reference to object of event
-       @param value a value (int/float/string) representing the object's value.
-              Often used for counters, gauges, etc.
+       @param value a numeric value representing the object's value.
+              Often used for counters, gauges, etc. Defaults to 0
+              Value is converted to float64 in the database.
        @param level the debug level (see eventlog.LogLevel)
        @param message a string message or comment to be stored with the event
        @param fields a dictionary of key/value pairs,
               for example, other dimensions or labels for the event
        @param logFrame if true, also collect info about code location
               (file, function, line number)
+       @param duration is a duration for performance measurements.
+              The value is seconds(float)
 
        In addition to these parameters, the event stores the current timestamp,
        (a float, in seconds since EPOCH),
@@ -97,26 +121,31 @@ class Event(object):
     def __init__(self,
                  name,
                  target,
-                 value=None,
+                 value=0,
                  level=LogLevel.OK,
                  message=None,
                  fields=None,
                  logFrame=False,
+                 duration=0,
                  ):
         self._d = {
             'name': name,
             'tstamp': time.time(),
+            'value': value,
             'version': Event.version,
             'host': Event.host,
             'pid': Event.pid,
             'level': self.validateLevel(level),
+            'duration': duration,
         }
-
+        if not _isnumeric(self._d["value"]):
+            raise Exception("Value must be numeric")
+        if not _isnumeric(self._d["duration"]):
+            raise Exception("duration must be numeric")
         self.setIfNN('site', Event.site)
         self.setIfNN('cluster', Event.cluster)
         self.setIfNN('target', target)
         self.setIfNN('message', message)
-        self.setIfNN('value', value)
 
         if logFrame:
             self.addCodeFrame()

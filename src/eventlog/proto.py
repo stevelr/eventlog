@@ -1,6 +1,7 @@
 # proto.py
 
 import six
+from .proto_msgpack import format_msgpack
 
 try:
     import event_capnp
@@ -41,6 +42,8 @@ def getSerializer(name='json'):
     if not name:
         name = 'json'
     lname = name.lower()
+    if lname == 'msgpack':
+        return format_msgpack
     if lname == 'json':
         return format_json
     if lname == 'capnp':
