@@ -28,7 +28,7 @@ class TransportPerfTest(unittest.TestCase):
         self.transport = NetTransport.createFromEnv()
 
         # verify logger is listening
-        self.transport.check()
+        self.transport.checkConnection()
 
     def tearDown(self):
         pass

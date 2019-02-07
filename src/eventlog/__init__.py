@@ -1,14 +1,13 @@
 # eventlog package
 
 from .config import getConfigSetting, initMiddleware
-from .event import Event, LogLevel
+from .event import makeMessage, newEvent
 from .handler import ConsoleEventHandler, EventFormatter,\
     EventHandler, format_console
-from .proto import formatTstampAsMillis, formatTstampAsNanos, getSerializer
-from .transport import MAX_MESSAAGE_LEN, MAX_SEND_ATTEMPTS,\
-    NetTransport, TCPSocketFactory
+from .proto import formatTstampAsMillis, formatTstampAsNanos
+from .transport import NetTransport
 
-__version__ = "0.9.102"  # keep in sync with ../../setup.py
+__version__ = "0.9.200"  # keep in sync with ../../setup.py
 
 
 # internal global for default loger
@@ -20,15 +19,12 @@ _systemDefaultEventHandler = None
 def defaultEventHandler():
     handler = _systemDefaultEventHandler
     if handler is None:
-        streamFmt = getConfigSetting('EVENTLOG_FORMAT')
-        serialize = getSerializer(streamFmt)
-
         # If connection fails, this throws an exception
         # If environment not setup up, returns None, so fall thru
         # to create ConsoleEventHandler
         transport = NetTransport.createFromEnv()
         if transport is not None:
-            handler = EventHandler(serialize=serialize, transport=transport)
+            handler = EventHandler(transport=transport)
         else:
             handler = ConsoleEventHandler()
         setDefaultEventHandler(handler)
@@ -58,8 +54,8 @@ __all__ = [
     initMiddleware,
 
     # event
-    Event,
-    LogLevel,
+    makeMessage,
+    newEvent,
 
     # handler
     ConsoleEventHandler,
@@ -70,11 +66,4 @@ __all__ = [
     # proto
     formatTstampAsMillis,
     formatTstampAsNanos,
-    getSerializer,
-
-    # transport
-    MAX_MESSAAGE_LEN,
-    MAX_SEND_ATTEMPTS,
-    NetTransport,
-    TCPSocketFactory,
 ]

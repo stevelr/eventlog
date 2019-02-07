@@ -3,28 +3,34 @@
 # This software may be modified and distributed under the terms
 # of the MIT license.  See the LICENSE file for details.
 import logging
+import six
 import socket
 import ssl
 import sys
+import threading
 import time
 from collections import deque
-from contextlib import contextmanager
 
 from .config import getConfigSetting
 from .stats import Counter, StatsCollector
 from .handler import ConsoleEventHandler
 
 # package constants
-SOCKET_TIMEOUT = 5.0
+SOCKET_TIMEOUT = int(getConfigSetting(
+                    "EVENTLOG_SOCKET_TIMEOUT", 5))
+
 # MAX_SEND_ATTEMPTS is the number of times a message send will be attempted
 # before throwing an exception to the caller.
 # In development environments, this should be set to 1
-MAX_SEND_ATTEMPTS = 3
+MAX_SEND_ATTEMPTS = int(getConfigSetting(
+                    "EVENTLOG_MAX_SEND_ATTEMPTS", 3))
+
 # PEAK_CONNECTIONS is size of pool (open connections not in use).
 # because connections are used for a very short time window (in testing,
 # less than 1ms), the number of connections can be fewer than number of
 # worker threads
-PEAK_CONNECTIONS = 5
+PEAK_CONNECTIONS = int(getConfigSetting(
+                    "EVENTLOG_PEAK_CONNECTIONS", 5))
 
 # MAX_MESSAGE_LEN is length of longest message, above which tx will fail
 #
@@ -32,9 +38,26 @@ PEAK_CONNECTIONS = 5
 # of an rsyslog message according to its spec. This number is shorter,
 # to catch potential bugs. If the application requires longer messages,
 # this could be safely increased to 128 * 1024
-MAX_MESSAAGE_LEN = 32 * 1024
+MAX_MESSAGE_LEN = int(getConfigSetting(
+                    "EVENTLOG_MAX_MESSAGE_LEN", 32 * 1024))
+
+# HEALTH_INTERVAL_SEC is how long we want between checks for log receiver
+# This number should be an integer factor of 60: (2,3,4,5,6,10,12,15,20,30)
+HEALTHCHECK_INTERVAL_SEC = int(getConfigSetting(
+                    "EVENTLOG_HEALTHCHECK_INTERVAL_SEC", 3))
+# this number should be a multiple of HEALTHCHECK_INTERVAL_SEC
+HEALTHCHECK_PRINT_INTERVAL_SEC = int(getConfigSetting(
+                    "EVENTLOG_HEALTHCHECK_PRINT_INTERVAL_SEC", 60))
 
 TRANSPORT_STATS_PREFIX = "eventlog_tx_"
+
+
+def errlog(s):
+    if six.PY3 and isinstance(s, bytes):
+        s = s.decode("UTF8")
+    sys.stderr.write(s)
+    if s[-1] != '\n':
+        sys.stderr.write('\n')
 
 
 # TransportStats holds counters for network messaging
@@ -49,8 +72,11 @@ class TransportStats(StatsCollector):
                                       "socket disconnects")
         self._time_elapsed = Counter(prefix + "time_elapsed_sec",
                                      "time spent sending, in seconds")
+        self._socket_count = Counter(TRANSPORT_STATS_PREFIX + "sockets_created_total",
+                            "total number of transport sockets created")
         self._all.extend([self._bytes_sent, self._events_sent,
-                         self._socket_errors, self._time_elapsed])
+                         self._socket_errors, self._time_elapsed,
+                         self._socket_count])
 
     def socket_error(self):
         self._socket_errors.inc(1)
@@ -63,6 +89,9 @@ class TransportStats(StatsCollector):
 
     def time_elapsed(self, t):
         self._time_elapsed.inc(t)
+
+    def getSocketCounter(self):
+        return self._socket_count
 
 
 # ConnectionPool for maintaining open connections to log server
@@ -84,21 +113,30 @@ class ConnectionPool:
                 c = self._pool.pop()
                 if c.isGood():
                     return c
+                else:
+                    c.close()
         except IndexError:
-            return self.makeConnection()
+            # pool empty make another
+            return self._makeConnection()
 
     def release(self, conn):
-        if conn.isGood():
-            self._pool.append(conn)
+        if conn is not None:
+            if conn.isGood():
+                self._pool.append(conn)
+            else:
+                conn.close()
 
-    def makeConnection(self):
-        return self._factory.create_socket()
+    def _makeConnection(self):
+        return Connection(self._factory.create_socket())
 
     # Close all connections in the pool
     # Does not close connections that are currently in use
     def closeAll(self):
-        map(lambda c: c.close(), self._pool)
-        self._pool.clear()
+        while True:
+            try:
+                self._pool.pop().close()
+            except IndexError:
+                break
 
 
 # Connection wraps a socket with a connection status
@@ -109,11 +147,13 @@ class Connection(object):
         self._ok = True
 
     def sendall(self, data):
-        try:
-            self._sock.sendall(data)
-        except Exception:
-            self._ok = False
-            raise
+        if six.PY3 and isinstance(data, str):
+            data = bytes(data, 'UTF8')
+        self._ok = False
+        # if this throws exception, _ok==False will keep it from pool
+        self._sock.sendall(data)
+        # no errors yet
+        self._ok = True
 
     def isGood(self):
         return self._sock is not None and self._ok
@@ -131,6 +171,7 @@ class Connection(object):
         except Exception:
             pass
         finally:
+            self._ok = False
             self._sock = None
 
 
@@ -138,10 +179,23 @@ class BaseTransport(object):
     def __init__(self):
         self.stats = TransportStats(TRANSPORT_STATS_PREFIX)
         self.log = logging.getLogger("eventlog_transport")
-        self.log.addHandler(ConsoleEventHandler())
+        handler = ConsoleEventHandler()
+        handler.setLevel(logging.DEBUG)
+        self.log.addHandler(handler)
+        self.status = True   # assume OK at start
+        self.statusLock = threading.RLock()
 
     def send(self, messages):
         raise Exception("not implemented")
+
+    # Returns True if connection is believed to be available
+    def checkStatus(self):
+        with self.statusLock:
+            return self.status
+
+    def setStatus(self, value):
+        with self.statusLock:
+            self.status = value
 
     def get_stats(self):
         return self.stats.get_stats()
@@ -157,14 +211,16 @@ class NetTransport(BaseTransport):
         super(NetTransport, self).__init__()
         self._socketFactory = socketFactory
         self._pool = ConnectionPool(self._socketFactory, pool_cap)
-        self._max_atempts = max_attempts
+        self._max_attempts = max_attempts
+
+        # pass socket counter hook to Connection class
+        self._socketFactory.setCounter(self.stats.getSocketCounter())
 
     # check confirms that network server is listening by creating
     # one throw-away connection. Uses current conection timeout.
     # If connection is not made, throws exception
-    def check(self):
-        nc = self._socketFactory.create_socket()
-        nc.close()
+    def checkConnection(self):
+        self._socketFactory.create_socket(SOCKET_TIMEOUT, False).close()
 
     # Construct NetTransport using environment variables
     @staticmethod
@@ -182,63 +238,101 @@ class NetTransport(BaseTransport):
             return transport
         return None
 
-    # getConnection returns a connection from the pool
-    # The contextmanager allows the connection to be used
-    # inside python's "with" statement to ensure it is returned to the pool
-    # regardless of whether or not an exception occurs while sending
-    @contextmanager
-    def getConnection(self, attemptNum=0):
-        if attemptNum > 0:
-            # if we are in a retry loop, always use new connections instead of pool
-            # If a server goes down or reboots, this procedure should
-            # cause the pool of dead connections to be cleaned out
-            # (deque removes from front when appending at its size limit)
-            conn = self._socketFactory.create_socket()
-        else:
-            # Use connection pool
-            conn = self._pool.take()
-        try:
-            yield conn
-        finally:
-            if conn.isGood():
-                self._pool.release(conn)
-            else:
-                conn.close()
-
     # send - sends a list of messages using transport
     def send(self, messages):
         total_bytes = 0
         total_msgs = 0
         start_time = time.time()
         attemptNum = 0
-        ex = None
+        exInfo = ""
         # in case we were accidentally called with a single message (byte arr),
         # don't be fooled by len(messages) in following loop
         if not isinstance(messages, list):
             messages = [messages]
-        while total_msgs < len(messages) and attemptNum < self._max_atempts:
+        while total_msgs < len(messages) and attemptNum < self._max_attempts:
             # try to send messages, with retries
             # if there is any io error, create a new connection
             # and give load balance a chance to try alternate server
-            with self.getConnection(attemptNum) as conn:
-                try:
-                    for m in messages:
-                        conn.sendall(m)
-                        total_bytes += len(m)
-                        total_msgs += 1
-                except Exception as e:
-                    ex = e
-                    attemptNum += 1
-                    self.stats.socket_error()
-                    self.log.error("Send failure #%d/%d: %s" %
-                                   (attemptNum, self._max_atempts, str(e)))
+            conn = None
+            try:
+                conn = self._pool.take()
+                for m in messages:
+                    conn.sendall(m)
+                    total_bytes += len(m)
+                    total_msgs += 1
+            except Exception as e:
+                if conn is not None:
+                    conn.reject()  # mark bad so it's not reused
+                exInfo = str(e)
+                attemptNum += 1
+                self.stats.socket_error()
+            finally:
+                self._pool.release(conn)
+            if attemptNum < self._max_attempts:
+                time.sleep(0.05)
         self.stats.events_sent(total_msgs)
         self.stats.bytes_sent(total_bytes)
         self.stats.time_elapsed(time.time() - start_time)
         if total_msgs < len(messages):
-            if ex is not None:
-                raise ex
-            raise Exception("Too many failures trying to send events")
+            # immediately after log receiver goes down, there could be
+            # multiple threads that each get to this point and
+            # try to launch the checker thread. The waitTillUp() method
+            # uses a lock to guarantee only one checker thread is created.
+            self.waitTillUp()
+            self.closePoolConnections()
+            raise Exception("Too many failures trying to send events: %s" % exInfo)
+
+    # close all connections
+    # next send operation will open a new connection
+    def closePoolConnections(self):
+        self._pool.closeAll()
+
+    # The purpose of the checker thread is to keep the server running smoothly
+    # if log receiver is down.  If every log attempt tried to contact
+    # a failing receiver, this server would slow to a crawl as all
+    # worker threads wait for connections and retry logic. As soon as the first
+    # log write fails, the status flag is set to false, sending all other
+    # logs to the failover log handler immediatly. Meanshile, this thread
+    # keeps checkin, and as soon as the log receiver is up, status is set True,
+    # and log sending resumes.
+    # Once the reciever is up, the checker thread has achieved its purpose and exits.
+    def waitTillUp(self):
+
+        # we might get called from multiple threads. Ensure that
+        # only one of them starts background thread
+        with self.statusLock:
+            if not self.checkStatus():
+                return
+            # status was good but now we need to start thread
+            self.setStatus(False)
+
+        # Main loop of background thread to check for log receiver
+        # As soon as connection is made, updates status to True and exits.
+        def checker(transport):
+            tick = 0
+            while True:
+                err = ""
+                try:
+                    transport.checkConnection()
+                    # it worked! get outta here
+                    transport.setStatus(True)
+                    break
+                except Exception as e:
+                    # connection failed
+                    err = str(e)
+                try:
+                    # keep waiting, but log each minute as reminder
+                    tick += 1
+                    if tick % (HEALTHCHECK_PRINT_INTERVAL_SEC // HEALTHCHECK_INTERVAL_SEC) == 0:
+                        errlog("Retry: attempt to connect to %s failed: %s" %
+                            (self._socketFactory.info(), err))
+                    time.sleep(HEALTHCHECK_INTERVAL_SEC)
+                except Exception as e:
+                    errlog("checker internal error: %s" % str(e))
+
+        t = threading.Thread(target=checker, args=(self,))
+        t.daemon = True
+        t.start()
 
 
 # TCPSocketFactory creates new TCP Sockets, with optional TLS
@@ -254,20 +348,24 @@ class TCPSocketFactory():
         self._keyfile = keyfile
         self._certfile = certfile
         self._ca_certs = ca_certs
+        self._counter = None
 
-    def create_socket(self, timeout=SOCKET_TIMEOUT):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect((self._host, self._port))
-        except Exception as ex:
-            sys.stderr.write("ERROR: opening transport to host=%s, port=%d %s\n"
-                             % (self._host, self._port, str(ex)))
-            raise
+    def info(self):
+        return "TCPSocketFactory(%s:%d)" % (self._host, self._port)
+
+    def setCounter(self, ctr):
+        self._counter = ctr
+
+    def create_socket(self, timeout=SOCKET_TIMEOUT, stats=True):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((self._host, self._port))
 
         # non-SSL
         if not self._tls_enable:
-            return Connection(sock)
+            if stats and self._counter is not None:
+                self._counter.inc(1)
+            return sock
 
         # TLS
         cert_reqs = ssl.CERT_REQUIRED
@@ -282,7 +380,7 @@ class TCPSocketFactory():
             certfile=self._certfile,
             ca_certs=self._ca_certs,
             cert_reqs=cert_reqs)
-        return Connection(sock)
+        return sock
 
     def __repr__(self):
         return "TCPSocketFactory[host=%s, port=%d]" % (self._host, self._port)

@@ -1,31 +1,27 @@
 import logging
-import math
 import os
 import sys
 import traceback
 from copy import copy
 
 import six
+import json
 
-from .event import Event, LogLevel, LogRecordEvent
-from .proto import getSerializer
+from .event import newEvent, newLogRecord, eventToBuffer, eventToJson
+from .event_pb2 import INFO
 
 
 # EventFormatter - turns a python logging record into an Event and formats it
 class EventFormatter(logging.Formatter):
 
-    # @param getSerializer - function
-    # that returns a serializer function,
-    # which flattens event to byte array (or string in py2)
-    # The Serializer is often tied to the network protocol
-    # (fluentd uses a msgpack serializer, etc.)
-    # if None, the default formatter (json) will be used
-    def __init__(self, getSerializerFn=None):
-        self.getSerializerFn = getSerializerFn or (lambda: getSerializer())
+    def __init__(self, handler):
+        super(EventFormatter, self).__init__()
+        self.handler = handler
 
     def format(self, record):
-        e = LogRecordEvent(record).toDict()
-        return self.getSerializerFn()(e)
+        e = newLogRecord(record)
+        data = self.handler.getSerializer()(e)
+        return data
 
 
 # EventHandler sends events over the network via a Transport
@@ -52,18 +48,19 @@ class EventFormatter(logging.Formatter):
 class EventHandler(logging.Handler):
 
     # Initialize EventHandler
-    # @param serialize function for turning event into byte stream
     # @param transport method of sending events to remote logger
+    # @param serializer method of converting event to buffer
     # @param replica optional handler for sending copies of events
     #        (for example, to send to console)
     # @param fallbackTx optional fallback transport in case primary tx
     #        fails to send
-    def __init__(self, serialize, transport,
+    def __init__(self, transport,
+                 serializer=eventToBuffer,
                  replica=None, fallbackTx=None):
         super(EventHandler, self).__init__()
-        self.serialize = serialize or getSerializer()
-        self.formatter = EventFormatter(self.getSerializer)
         self.transport = transport
+        self.serializer = serializer
+        self.formatter = EventFormatter(self)
         self.replica = replica
         self.fallbackTx = fallbackTx
 
@@ -73,7 +70,7 @@ class EventHandler(logging.Handler):
     # If either primary or replica transport hangs, it will block
     # the current thread.
     def logEvent(self, event):
-        data = self.serialize(event.toDict())
+        data = self.getSerializer()(event)
         self._sendData(data)
 
         # if a replica handler has been set up, copy logs there
@@ -83,27 +80,38 @@ class EventHandler(logging.Handler):
     # send byte stream through transport
     # Internal method that logs byte stream
     def _sendData(self, data):
-        try:
-            self.transport.send([data, ])
-        except Exception:
-            errLog = sys.stderr
-            if self.fallbackTx:
-                errLog.write("ERROR: Event transport failed, trying fallback\n")
-                try:
-                    # if fallback fails, then throw new exception
-                    self.fallbackTx.send([data, ])
-                except Exception:
-                    errLog.write("CRITICAL: Fallback event transport failed\n")
-                    errLog.write(data)
-                    t, v, tb = sys.exc_info()
-                    traceback.print_exception(t, v, tb, None, errLog)
-                    raise
-            else:
-                errLog.write("ERROR: Event transport failed and no fallback is defined\n")
+        if six.PY3 and isinstance(data, str):
+            data = bytes(data, 'UTF8')
+
+        # if failures occur here, we can't log them because logging itself is failing
+        # The final fallback is stderr
+        errLog = sys.stderr
+
+        if self.transport.checkStatus():
+            try:
+                self.transport.send([data, ])
+                return
+            except Exception:
+                if self.fallbackTx:
+                    errLog.write("ERROR: Event transport failed, trying fallback\n")
+                else:
+                    errLog.write("ERROR: Event transport failed and no fallback is defined\n")
+
+        if self.fallbackTx:
+            # try fallback, if transport is down or first attempt failed
+            try:
+                # if fallback fails, then throw new exception
+                self.fallbackTx.send([data, ])
+            except Exception:
+                errLog.write("CRITICAL: Fallback event transport failed\n")
+                errLog.write(data)
+                t, v, tb = sys.exc_info()
+                traceback.print_exception(t, v, tb, None, errLog)
+                raise
 
     # override emit to make everything go through logEvent
     def emit(self, record):
-        event = LogRecordEvent(record)
+        event = newLogRecord(record)
         self.logEvent(event)
 
     # Create a Counter/Gauge value that logs all changes.
@@ -111,19 +119,10 @@ class EventHandler(logging.Handler):
         return _LoggingValue(self, name, target, initialValue, fields)
 
     def getSerializer(self):
-        return self.serialize
+        return self.serializer
 
     def setSerializer(self, ser):
-        self.serialize = ser
-
-    # add a filter function to process event objects
-    # before they are serialized. A filter function
-    # takes dictionary and returns the processed dictionary.
-    # Filters can be cascaded.
-    def addFilter(self, filter):
-        ser = self.getSerializer()
-        new_ser = lambda evDict: ser(filter(evDict))
-        self.setSerializer(new_ser)
+        self.serializer = ser
 
     # add secondary handler (usually a ConsoleEventHandler)
     # if parameter is None, disables secondary handler
@@ -177,17 +176,17 @@ class _LoggingValue(object):
     # The event is transmitted regardless of information level; level is
     # intended to be used for downstream filtering and alerting.
     # @param value should be numeric or string.
-    def set(self, value, params={}, message=None, level=LogLevel.INFO):
+    def set(self, value, params={}, message=None, level=INFO):
         f = copy(self.fields)
         self.value = value
         for k, v in six.iteritems(params):
             f[k] = v
-        e = Event(self.name,
-                  self.target,
-                  level=level,
-                  value=value,
-                  fields=f,
-                  message=message)
+        e = newEvent(self.name,
+                     self.target,
+                     level=level,
+                     value=value,
+                     fields=f,
+                     message=message)
         self.eventHandler.logEvent(e)
 
     # get returns the current value of the counter or gauge
@@ -208,75 +207,53 @@ class _LoggingValue(object):
         return self.fields
 
 
-# returns compact display of dict for human readability
-def print_dict(d):
-    s = ''
-    for k in sorted(d.keys()):
-        val = d[k]
-        val = isinstance(val, dict) and ('{' + print_dict(val) + '}') or str(val)
-        s = s + k + ':' + val + ' '
-    return s[:-1]  # remove trailing space
-
-
-# default format for line 1 format
-_CONSOLE_LINE1_FORMAT = "{tstamp:<12} {level:<5} {name}:{target} ({value}) {message}"
-_CONSOLE_LINE2_FORMAT = ' ' * 34 + "{host}.{pid} {code} {other}"
-# Any event fields not listed here will be included in 'other'
-_not_other = ('code', 'codeFile', 'codeFunc', 'codeLine', 'host', 'level',
-              'message', 'name', 'pid', 'target', 'tstamp', 'value', 'version')
+# default format for console output
+_indent = ' ' * 34
+_CONSOLE_FORMAT = '''{tstamp:<12} {log_level:<5} {name}:{target} ({value}) {message}
+{_indent}{user} {server_host}.{server_pid} {code}
+{_indent}{http_remote_addr}'''
 
 
 # format for compact and human readable console output
-# @param line1Format format string for console output line 1
-# @param line2Format format string for line 2
-# only line 1 is generated if line 2 is blank
-# @param delim newline delimeter
-def format_console(evDict, line1Format, line2Format, delim=b'\n'):
-    p = copy(evDict)  # copy dict so we don't modify evDict param
-    keys = set(p.keys())
+# @param textFormat format string for console output
+# If there is no data on last rows, they are removed
+def format_console(event, textFormat=_CONSOLE_FORMAT):
+    p = json.loads(eventToJson(event))
+    p['tstamp'] = "%.3f" % p['tstamp']
+    for subdict in ('server', 'http', 'log'):
+        if subdict in p:
+            for k in p[subdict].keys():
+                p[subdict + "_" + k] = p[subdict][k]
 
-    # fix tstamp to show seconds + %.3f millis
-    # if integer already, leave as-is
-    ts = p["tstamp"]
-    p["tstamp"] = math.floor(ts * 1000) / 1000 if isinstance(ts, float) else ts
-    # convert level (int) to string name
-    p["level"] = LogLevel.toString(p["level"])
-    # replace None with empty string
-    for f in ('value', 'target', 'message'):
-        if p.get(f, None) is None:
-            p[f] = ""
+    # ensure keys used in format string are defined
+    for k in ('log_level', 'http_remote_addr', 'http_status', 'message', 'name',
+              'server_host', 'server_pid', 'session', 'target', 'user', 'value'):
+        if k not in p:
+            p[k] = ''
+
     # meta-field "code" combines func, file, lineo
-    file = p.get("codeFile", "")
-    func = p.get("codeFunc", "")
-    lineNo = str(p.get("codeLine", ""))
+    file = p.get("log_code_file", "")
+    func = p.get("log_code_func", "")
+    lineNo = str(p.get("log_code_line", ""))
     if file and lineNo:
         p["code"] = "%s|%s@%s" % (func, os.path.basename(file), lineNo)
     else:
         p["code"] = ""
+    p["_indent"] = _indent
 
-    # remove fields used in line 1 to determine 'other' for line 2
-    other = keys.difference(_not_other)
-    p['other'] = print_dict({k: p[k] for k in other})
-
-    # generate line1 and, if non-blank, line 2
-    line1 = line1Format.format(**p)
-    line2 = line2Format.format(**p)
-    out = line1 + delim + line2 if line2.strip() else line1
-    # console writer adds final \n
-    return out
+    text = textFormat.format(**p)
+    text.strip()
+    return text
 
 
 # log to console (or a writable stream) instead of sending to logstash
 # also doesn't create worker thread
 class ConsoleEventHandler(EventHandler):
 
-    def __init__(self, ch=sys.stdout, delim=b'\n',
-                 line1Format=_CONSOLE_LINE1_FORMAT,
-                 line2Format=_CONSOLE_LINE2_FORMAT):
-        self.delim = delim.decode() if six.PY3 and isinstance(delim, bytes) else delim
+    def __init__(self, ch=sys.stdout, textFormat=_CONSOLE_FORMAT):
         super(ConsoleEventHandler, self).__init__(
-            serialize=lambda ed: format_console(ed, line1Format, line2Format, self.delim),
-            transport=None
+            transport=None,
+            serializer=lambda e: format_console(e, textFormat),
         )
         self.ch = ch
 
@@ -287,4 +264,4 @@ class ConsoleEventHandler(EventHandler):
             self.ch.write(buf.decode())
         else:
             self.ch.write(buf)
-        self.ch.write(self.delim)
+        self.ch.write('\n')

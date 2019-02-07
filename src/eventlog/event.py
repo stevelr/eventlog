@@ -1,258 +1,182 @@
 import os
+import random
 import six
 import socket
 import sys
 import time
 import traceback
 
-from logging import addLevelName
+from .loglevel import INFO, NOTSET, OK
+from .event_pb2 import DeployType, EventHeader, Extra, Event, LogLevel
+from google.protobuf.json_format import MessageToJson
 
-import six
 from .config import _getUserContext, getConfigSetting
+from .counter import AtomicCounter
 
 try:
     import ujson as json
 except ImportError:
     import json
 
-_EVENT_SCHEMA_VERSION = (0, 1)   # major.minor (uint8,uint8)
+
+_EVENT_SCHEMA_VERSION = (0, 1)
 
 # _isnumeric returns True if parameter is a numeric type (int, long, float)
 _isnumeric = lambda x: isinstance(x, six.integer_types) or isinstance(x, float)
 
-class LogLevel:
-    NOTSET = 0            # value when level is not specified
 
-    TRACE = 5
-    DEBUG = 10
-    INFO = 20             # informational message, no error condition
-    OK = 25               # status: systems operating normally
-    WARNING = WARN = 30   # warning condition, may need attention
-    ERROR = ERR = 40      # error condition, not operating normally
-    CRITICAL = CRIT = 50  # system critical
-    EXTREME = 60          # more urgent than critical
-
-    MIN_VALUE = NOTSET
-    MAX_VALUE = EXTREME
-
-    @staticmethod
-    def toString(level):
-        _val2str = {
-            LogLevel.TRACE: "TRACE",
-            LogLevel.DEBUG: "DEBUG",
-            LogLevel.NOTSET: "_",
-            LogLevel.INFO: "INFO",
-            LogLevel.OK: "OK",
-            LogLevel.WARN: "WARN",
-            LogLevel.ERROR: "ERROR",
-            LogLevel.CRITICAL: "CRITICAL",
-            LogLevel.EXTREME: "EXTREME",
-        }
-        return _val2str.get(level, "")
-
-    # returns integer log level from name, e.g., "DEBUG" returns 3
-    # if not found, returns KeyError
-    @staticmethod
-    def valueOf(levelName):
-        try:
-            return getattr(LogLevel, levelName.upper())
-        except AttributeError:
-            raise KeyError(levelName, "Invalid log level")
-
-    # optionally, register our additional levels with python logging stack
-    @staticmethod
-    def registerLevels():
-        addLevelName(LogLevel.TRACE, 'TRACE')
-        addLevelName(LogLevel.EXTREME, 'EXTREME')
-        addLevelName(LogLevel.OK, 'OK')
-
-class FVal(object):
-
-
-    # Creates a string field value
-    @staticmethod
-    def sval(name, string_val):
-        return {'name':name, 'sval':string_val}
-
-    # Creates a float field value
-    @staticmethod
-    def fval(name, float_val):
-        return {'name':name, 'fval':float_val}
-
-    # Creates an int field value
-    @staticmethod
-    def ival(name, int_val):
-        return {'name':name, 'ival':int_val}
-
-
-class Event(object):
+class EventSettings(object):
 
     # static variables calculated once and cached
     host = socket.gethostname()
-    version = _EVENT_SCHEMA_VERSION
     pid = os.getpid()
-    # site and cluster can be defined in environment or settings
+    # client, datactr and cluster can be defined in environment or settings
     # (if both, environment takes precedence)
     # if neither, an error message is printed
-    site = getConfigSetting('EVENTLOG_SITE')
-    cluster = getConfigSetting('EVENTLOG_CLUSTER')
+    client = getConfigSetting('EVENTLOG_CLIENT') or u''
+    datactr = getConfigSetting('EVENTLOG_DATACTR') or u''
+    cluster = getConfigSetting('EVENTLOG_CLUSTER') or u''
+    deploy = getConfigSetting('EVENTLOG_DEPLOY') or DeployType.Value('PROD')
 
-    '''Eventlog constructor
-       @param name the event name
-       @param target reference to object of event
-       @param value a numeric value representing the object's value.
-              Often used for counters, gauges, etc. Defaults to 0
-              Value is converted to float64 in the database.
-       @param level the debug level (see eventlog.LogLevel)
-       @param message a string message or comment to be stored with the event
-       @param fields a dictionary of key/value pairs,
-              for example, other dimensions or labels for the event
-       @param logFrame if true, also collect info about code location
-              (file, function, line number)
-       @param duration is a duration for performance measurements.
-              The value is seconds(float)
+    # idgen creates a unique event id within this VM/insance.
+    # It could be considered globally unique but doesn't need to be.
+    # The main purposes are to disambiguate events with the same
+    # millisecond timestamp, and to support end-to-end debug tracing
+    # It can also be used to measure how many events are generated
+    # by each server over a time period
+    _idgen = AtomicCounter(random.getrandbits(48))
 
-       In addition to these parameters, the event stores the current timestamp,
-       (a float, in seconds since EPOCH),
-       optional server/site info,
-       http request info such as current user, request url, etc
-       (if used within django or http server)
-    '''
-    def __init__(self,
-                 name,
-                 target,
-                 value=0,
-                 level=LogLevel.OK,
-                 message=None,
-                 fields=None,
-                 logFrame=False,
-                 duration=0,
-                 ):
-        self._d = {
-            'name': name,
-            'tstamp': time.time(),
-            'value': value,
-            'version': Event.version,
-            'host': Event.host,
-            'pid': Event.pid,
-            'level': self.validateLevel(level),
-            'duration': duration,
-        }
-        if not _isnumeric(self._d["value"]):
-            raise Exception("Value must be numeric")
-        if not _isnumeric(self._d["duration"]):
-            raise Exception("duration must be numeric")
-        self.setIfNN('site', Event.site)
-        self.setIfNN('cluster', Event.cluster)
-        self.setIfNN('target', target)
-        self.setIfNN('message', message)
 
-        if logFrame:
-            self.addCodeFrame()
+# newEvent create a new Event
+# @param name the event name
+# @param target reference to object of event
+# @param value a numeric value representing the object's value.
+#       Often used for counters, gauges, etc. Defaults to 0
+#       Value is converted to float64 in the database.
+# @param level the debug level (see eventlog.loglevel)
+# @param message a string message or comment to be stored with the event
+# @param fields a dictionary of key/value pairs,
+#       for example, other dimensions or labels for the event
+# @param logFrame if true, also collect info about code location
+#       (file, function, line number)
+# @param duration is a duration for performance measurements.
+#       The value is seconds(float)
+#
+# In addition to these parameters, the event stores the current timestamp,
+# (a float, in seconds since EPOCH),
+# optional server/site info,
+# http request info such as current user, request url, etc
+# (if used within django or http server)
+def newEvent(name,
+             target,
+             value=0,
+             level=OK,
+             message=None,
+             fields=None,
+             logFrame=False,
+             duration=0,
+             ):
+    e = Event(
+        name=name,
+        tstamp=time.time(),
+        target=target,
+        value=value,
+        message=message,
+        duration=duration,
+        eid=EventSettings._idgen.nextVal(),
+    )
+    e.log.level = level
+    e.server.host = EventSettings.host
+    e.server.pid = EventSettings.pid
+    e.server.deploy = EventSettings.deploy
+    e.server.client = EventSettings.client
+    e.server.datactr = EventSettings.datactr
+    e.server.cluster = EventSettings.cluster
+    e.version.major = _EVENT_SCHEMA_VERSION[0]
+    e.version.minor = _EVENT_SCHEMA_VERSION[1]
 
-        # collect user context, if middleware hook is installed
-        if _getUserContext:
-            reqId, user, ses = _getUserContext()
-            self.set('reqId', reqId)
-            self.set('user', user)
-            self.set('session', ses)
+    if logFrame:
+        addCodeFrame(e)
 
-        if fields:
-            self.addFields(fields)
+    # collect user context, if middleware hook is installed
+    if _getUserContext:
+        e.user, e.session = _getUserContext()
 
-    def printFrame(self, f):
-        print("file: ", f.f_code.co_filename,
-              "line: ", f.f_code.co_firstlineno, f.f_lineno,
-              "name: ", f.f_code.co_name)
+    if fields:
+        addFields(e, fields)
 
-    def validateLevel(self, level):
-        if isinstance(level, six.integer_types):
-            lv = level
-        elif isinstance(level, six.string_types):
-            lv = LogLevel.valueOf(level)
+    return e
+
+
+def addLabels(e, labels):
+    for l in labels:
+        e.labels.append(l)
+
+
+# addFields adds fields to the event.
+# @param fields - dict of key-value pairs
+def addFields(e, fields):
+    e.fields.extend([Extra(key=k, value=v) for k, v in six.iteritems(fields)])
+
+
+# get file and lineno of caller from stack frame
+def addCodeFrame(e):
+    try:
+        frame = sys._getframe(3)
+    except Exception:
+        return
+    while frame:
+        fname = frame.f_code.co_filename
+        if fname.endswith('logging/__init__.py') \
+                 or '/eventlog' in fname:
+            frame = frame.f_back
         else:
-            raise Exception("Invalid level: " + str(level))
-        if lv < LogLevel.MIN_VALUE or lv > LogLevel.MAX_VALUE:
-            raise Exception("Level out of range: %d" % lv)
-        return lv
-
-    '''addTags adds a list of string tags to the event.
-       Tags are modeled as fields, with field_name=label, value=1
-    '''
-    def addTags(self, tags):
-        self.addFields({t: 1 for t in tags})
-
-    '''addFields adds fields to the event.
-       @param fields - dict of key-value pairs
-    '''
-    def addFields(self, fields):
-        try:
-            fmap = self._d['fields']
-        except KeyError:
-            fmap = {}
-            self.set('fields', fmap)
-        for (k, v) in six.iteritems(fields):
-            fmap[k] = v
-
-    '''addLabels adds a set of label/value pairs (alias for addFields)'''
-    def addLabels(self, labels):
-        self.addFields(labels)
-
-    # get file and lineno of caller from stack frame
-    def addCodeFrame(self):
-        try:
-            frame = sys._getframe(3)
-        except Exception:
-            return
-        while frame:
-            fname = frame.f_code.co_filename
-            if fname.endswith('logging/__init__.py') \
-                     or '/eventlog' in fname \
-                     or 'logstash_async' in fname:
-                frame = frame.f_back
-            else:
-                break
-        self.set('codeFile', frame.f_code.co_filename)
-        self.set('codeLine', frame.f_lineno)
-        self.set('codeFunc', frame.f_code.co_name)
-
-    # returns a dictionary containing all the event fields
-    # extra fields are in "fields"
-    def toDict(self):
-        return self._d
-
-    def set(self, key, val):
-        self._d[key] = val
-
-    def setIfNN(self, key, val):
-        if val is not None:
-            self._d[key] = val
+            break
+    e.log.code_file = frame.f_code.co_filename
+    e.log.code_line = frame.f_lineno
+    e.log.code_func = frame.f_code.co_name
 
 
-# LogRecordEvent - an Event wrapper around a python logging Record
-class LogRecordEvent(Event):
+def eventToJson(e):
+    return MessageToJson(e)
 
-    def __init__(self, record):
-        super(LogRecordEvent, self).__init__(
-            name='python_log',
-            target='logger:' + record.name,
-            level=record.levelname,
-            message=record.getMessage(),
-            logFrame=True,
-        )
-        if record.created:
-            self.set('tstamp', record.created)
-        tags = getattr(record, 'tags', [])
-        if tags:
-            self.addTags(tags)
-        extra = getattr(record, 'extra', {})
-        if extra:
-            self.addFields(extra)
-        if getattr(record, 'exc_info', None) is not None:
-            (excType, val, tb) = record.exc_info
-            tbdata = traceback.extract_tb(tb)
-            self.addFields({
-                'exc_info': json.dumps((excType, val, tbdata)),
-            })
-            if self._d == LogLevel.NOTSET:
-                self.set('level', LogLevel.INFO)
+
+def eventToBuffer(e):
+    return e.SerializeToString()
+
+
+def makeMessage(e, category):
+    buf = eventToBuffer(e)
+    header = EventHeader(
+        eid=e.eid,
+        tsnano=int(e.tstamp * 1e9),
+        category=category,
+        msglen=len(buf),
+    )
+    header.version.major = _EVENT_SCHEMA_VERSION[0]
+    header.version.minor = _EVENT_SCHEMA_VERSION[1]
+    hbuf = header.SerializeToString()
+    return(hbuf, buf)
+
+
+def newLogRecord(record):
+    e = newEvent(name='log',
+                 target='logger:' + record.name,
+                 level=LogLevel.Value(record.levelname),
+                 message=record.getMessage(),
+                 logFrame=True)
+    if record.created:
+        e.tstamp = record.created
+    tags = getattr(record, 'tags', [])
+    if tags:
+        e.addLabels(tags)
+    extra = getattr(record, 'extra', {})
+    if extra:
+        e.addFields(extra)
+    if getattr(record, 'exc_info', None) is not None:
+        (excType, val, tb) = record.exc_info
+        tbdata = traceback.extract_tb(tb)
+        e.log.stack_trace = json.dumps((excType, val, tbdata))
+    if e.log.level == NOTSET:
+        e.log.level = INFO
+    return e

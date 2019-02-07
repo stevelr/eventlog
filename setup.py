@@ -4,14 +4,15 @@ from os import path
 from setuptools import setup
 
 NAME = "eventlog"
-VERSION = "0.9.102"  # keep in sync with src/eventlog/__init__.py
+VERSION = "0.9.200"  # keep in sync with src/eventlog/__init__.py
 requires = []
 
+# markdown here is in RST already, so the warning below is commented out
 try:
     from pypandoc import convert_text
     format_md = lambda f: convert_text(f, 'rst', format='md')
 except (OSError, ImportError):
-    print("warning: pypandoc module not found, could not convert Markdown to RST")
+    # print("warning: pypandoc module not found, could not convert Markdown to RST")
     format_md = lambda f: f
 
 

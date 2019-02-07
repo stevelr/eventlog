@@ -1,7 +1,6 @@
 # proto.py
 
 import six
-from .proto_msgpack import format_msgpack
 
 try:
     import event_capnp
@@ -35,20 +34,6 @@ def format_capnp(evDict):
         return event_capnp.Event.new_message(**evDict)
     else:
         return format_json(evDict)
-
-
-# returns the named event serializer
-def getSerializer(name='json'):
-    if not name:
-        name = 'json'
-    lname = name.lower()
-    if lname == 'msgpack':
-        return format_msgpack
-    if lname == 'json':
-        return format_json
-    if lname == 'capnp':
-        return format_capnp
-    raise Exception("Unrecognized event serialization format " + name)
 
 
 # Filter function that converts tstamp

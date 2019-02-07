@@ -1,13 +1,13 @@
 import unittest
 
-from eventlog import Event, EventHandler, ConsoleEventHandler, formatTstampAsMillis
+from eventlog import newEvent, EventHandler, ConsoleEventHandler, formatTstampAsMillis
 from logging import getLogger, DEBUG, INFO
 
 def viewResource(resourceId):
-    return Event('resource_view', target=resourceId)
+    return newEvent('resource_view', target=resourceId)
 
 def editResource(resourceId, comment=None):
-    return Event('resource_edit', target=resourceId, message=comment)
+    return newEvent('resource_edit', target=resourceId, message=comment)
 
 class ConsoleLogTest(unittest.TestCase):
 
@@ -26,7 +26,7 @@ class ConsoleLogTest(unittest.TestCase):
     def test_full(self):
         self.log.debug("a debug message")
         self.log.info("an info message")
-        self.log.warn("a warning message")
+        self.log.warning("a warning message")
         self.log.critical("a critical messase")
         self.assertTrue(True)
 
