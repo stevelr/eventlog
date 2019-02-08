@@ -1,5 +1,5 @@
 # eventlog/requirements.txt
 prometheus_client
-protobuf>=3.6.1
+protobuf>=3.6.1,<3.7
 ujson>=1.35
 six

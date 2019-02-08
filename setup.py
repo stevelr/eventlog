@@ -44,7 +44,7 @@ setup(
     package_dir={"": "src"},
     install_requires = [
         "prometheus_client",
-        "protobuf",
+        "protobuf>=3.6.1,<3.7",
         "six",
         "ujson"
     ],
