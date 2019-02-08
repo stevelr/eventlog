@@ -5,12 +5,6 @@ from setuptools import setup
 
 NAME = "eventlog"
 VERSION = "0.9.210"  # keep in sync with src/eventlog/__init__.py
-requires = [
-    "msgpack",
-    "protobuf",
-    "ujson"
-    "six",
-]
 
 # markdown here is in RST already, so the warning below is commented out
 try:
@@ -19,7 +13,6 @@ try:
 except (OSError, ImportError):
     # print("warning: pypandoc module not found, could not convert Markdown to RST")
     format_md = lambda f: f
-
 
 here = path.abspath(path.dirname(__file__))
 with open(path.join(here, 'README.rst'), "rb") as fobj:
@@ -49,5 +42,10 @@ setup(
     keywords="eventlog logging analytics metrics fluent pubsub",
     packages=["eventlog"],
     package_dir={"": "src"},
-    requires=requires
+    install_requires = [
+        "prometheus_client",
+        "protobuf",
+        "six",
+        "ujson"
+    ],
 )

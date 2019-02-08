@@ -1,5 +1,5 @@
 # eventlog/requirements.txt
-msgpack
+prometheus_client
 protobuf>=3.6.1
 ujson>=1.35
 six
