@@ -7,7 +7,7 @@ from .handler import ConsoleEventHandler, EventFormatter,\
 from .proto import formatTstampAsMillis, formatTstampAsNanos
 from .transport import NetTransport
 
-__version__ = "0.9.200"  # keep in sync with ../../setup.py
+__version__ = "0.9.210"  # keep in sync with ../../setup.py
 
 
 # internal global for default loger

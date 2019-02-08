@@ -4,8 +4,13 @@ from os import path
 from setuptools import setup
 
 NAME = "eventlog"
-VERSION = "0.9.200"  # keep in sync with src/eventlog/__init__.py
-requires = []
+VERSION = "0.9.210"  # keep in sync with src/eventlog/__init__.py
+requires = [
+    "msgpack",
+    "protobuf",
+    "ujson"
+    "six",
+]
 
 # markdown here is in RST already, so the warning below is commented out
 try:
