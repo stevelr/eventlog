@@ -42,7 +42,7 @@ setup(
     keywords="eventlog logging analytics metrics fluent pubsub",
     packages=["eventlog"],
     package_dir={"": "src"},
-    install_requires = [
+    install_requires=[
         "prometheus_client",
         "protobuf>=3.6.1,<3.7",
         "six",

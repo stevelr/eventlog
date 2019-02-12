@@ -1,20 +1,19 @@
+from eventlog import newEvent, ConsoleEventHandler
 
-from eventlog import Event, EventLogger, ConsoleEventLogger, filter_tstamp_millis
+from logging import getLogger, DEBUG
 
-from logging import getLogger, DEBUG, INFO
 
 def viewResource(resourceId):
-    return Event('resource_view', resourceId)
+    return newEvent(name="resource_view", target=resourceId)
+
 
 def editResource(resourceId, comment=None):
-    return Event('resource_edit', resourceId, message=comment)
+    return newEvent(name="resource_edit", target=resourceId, message=comment)
 
 
 # ConsoleEventLogger logs json events to stderr.
 # It tests the Event processing but does not forward events to logstash
-consoleLogger = ConsoleEventLogger()
-# convert timestamps to milliseconds before logging
-wrapSerializer()
+consoleLogger = ConsoleEventHandler()
 
 # typical logging setup in python source file
 log = getLogger()

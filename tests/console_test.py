@@ -1,20 +1,21 @@
 import unittest
 
-from eventlog import newEvent, EventHandler, ConsoleEventHandler, formatTstampAsMillis
-from logging import getLogger, DEBUG, INFO
+from eventlog import newEvent, ConsoleEventHandler
+from logging import getLogger
+
 
 def viewResource(resourceId):
     return newEvent('resource_view', target=resourceId)
 
+
 def editResource(resourceId, comment=None):
     return newEvent('resource_edit', target=resourceId, message=comment)
+
 
 class ConsoleLogTest(unittest.TestCase):
 
     def setUp(self):
         self.consoleHandler = ConsoleEventHandler()
-        # format timestamps as milliseconds
-        #self.consoleLogger.addFilter(formatTstampAsMillis)
 
         log = getLogger()
         log.addHandler(self.consoleHandler)

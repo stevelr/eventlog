@@ -4,10 +4,10 @@ import sys
 import threading
 import time
 import unittest
-#import tracemalloc
 from eventlog.transport import NetTransport, TCPSocketFactory, HEALTHCHECK_INTERVAL_SEC
 
 TEST_PORT = 6543
+
 
 def errlog(s):
     if six.PY3 and isinstance(s, bytes):
@@ -30,7 +30,7 @@ def logBlackHole(controller, host, port):
             try:
                 s.close()
                 s = None
-            except:
+            except:  # noqa: E722
                 pass
         return
     errlog("Listener thread started")
@@ -73,9 +73,8 @@ class Controller(object):
             self._shouldAccept = False
         if self._socket:
             try:
-                #self._socket.shutdown(socket.SHUT_RDWR)
                 self._socket.close()
-            except:
+            except:     # noqa: E722
                 # ignore potential race conditions
                 # while shutting down test
                 pass
@@ -86,7 +85,6 @@ class Controller(object):
         with self._lock:
             self._shouldAccept = True
         self._thread = threading.Thread(target=logBlackHole, args=(self, self._host, self._port))
-        #self._thread.daemon = True
         self._thread.start()
 
     def setSocket(self, sock):
@@ -119,15 +117,14 @@ class FailoverLogTest(unittest.TestCase):
         # avoids errors about leaking sockets
         self._controller.stopListening()
         self._transport.closePoolConnections()
-        #snapshot = tracemalloc.take_snapshot()
-        for (k,v) in self._transport.stats.get_stats():
+        for (k, v) in self._transport.stats.get_stats():
             errlog("%s: %f" % (k, float(v)))
 
     def test_full(self):
 
         tx = self._transport
 
-        buf = [ '{s:"0123456"}\n', ]
+        buf = ['{s:"0123456"}\n']
         self.assertTrue(tx.checkStatus(), "transport good")
         self.assertEqual(self._controller.connectionCount(), 0)
 
@@ -150,7 +147,6 @@ class FailoverLogTest(unittest.TestCase):
         # test stopListening
         self._controller.stopListening()
         tx.closePoolConnections()
-        #time.sleep(5)
         try:
             tx.send(buf)
             tx.send(buf)
@@ -160,12 +156,11 @@ class FailoverLogTest(unittest.TestCase):
         self.assertFalse(send_ok, "send to close receiver should have failed")
 
         # give it a chance to shut down
-        #time.sleep(1.0)
         try:
             # send another one just to confirm
             tx.send(buf)
             send_ok = True
-        except:
+        except:               # noqa: E722
             send_ok = False
         self.assertFalse(send_ok, "expect send to fail when transport stopped")
         self.assertFalse(tx.checkStatus(), "transport stopped")
@@ -185,4 +180,4 @@ class FailoverLogTest(unittest.TestCase):
         x = self._controller.connectionCount()
         tx.send(buf)
         time.sleep(0.01)
-        self.assertEqual(self._controller.connectionCount(), x+1)
+        self.assertEqual(self._controller.connectionCount(), x + 1)

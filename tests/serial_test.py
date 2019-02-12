@@ -1,23 +1,24 @@
 import six
 import unittest
 
-from eventlog import newEvent, EventHandler, ConsoleEventHandler, formatTstampAsMillis, makeMessage
-from logging import getLogger, DEBUG, INFO
+from eventlog import newEvent, EventHandler, ConsoleEventHandler, makeMessage
+from logging import getLogger
 from eventlog.event_pb2 import Event, EventHeader, HttpMethod
 from google.protobuf.json_format import MessageToJson
+
 
 def viewResource(resourceId):
     return newEvent('resource_view', target=resourceId)
 
+
 def editResource(resourceId, comment=None):
     return newEvent('resource_edit', target=resourceId, message=comment)
+
 
 class ConsoleLogTest(unittest.TestCase):
 
     def setUp(self):
         self.consoleHandler = ConsoleEventHandler()
-        # format timestamps as milliseconds
-        #self.consoleLogger.addFilter(formatTstampAsMillis)
 
         log = getLogger()
         log.addHandler(self.consoleHandler)
@@ -36,11 +37,11 @@ class ConsoleLogTest(unittest.TestCase):
     # and EventHandler.getSerializer()
     def test_serializer(self):
         e = newEvent("MyEvent",
-            "Mytarget",
-            value=17.32,
-            duration=1e-8,
-            message="The rain in Spain"
-            )
+                     "Mytarget",
+                     value=17.32,
+                     duration=1e-8,
+                     message="The rain in Spain"
+                     )
         e.server.host = "Hostess"
         e.server.pid = 8080
         e.http.method = HttpMethod.Value('POST')
@@ -71,17 +72,15 @@ class ConsoleLogTest(unittest.TestCase):
         # complete test dumo to json
         j1 = MessageToJson(e)
         j2 = MessageToJson(e2)
-        self.assertEqual(e, e2)
+        self.assertEqual(j1, j2)
 
     def test_header(self):
-        e = newEvent("fred","7734",value=100,message="Hello")
+        e = newEvent("fred", "7734", value=100, message="Hello")
         (hbuf, ebuf) = makeMessage(e, "tiger")
 
         hdr = EventHeader.FromString(hbuf)
 
         self.assertEqual(hdr.category, "tiger")
         self.assertEqual(hdr.eid, e.eid)
-        self.assertEqual(hdr.tsnano, int(e.tstamp*1e9))
+        self.assertEqual(hdr.tsnano, int(e.tstamp * 1e9))
         self.assertEqual(hdr.msglen, len(ebuf))
-
-        #print("Header len=%d, Message len=%d" %  (len(hbuf), len(ebuf)))
